@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import {
+  BadRequestException,
   Body,
   CanActivate,
   Controller,
@@ -8,6 +9,7 @@ import {
   Get,
   Header,
   HttpCode,
+  HttpStatus,
   Inject,
   INestApplication,
   Injectable,
@@ -15,7 +17,10 @@ import {
   Module,
   NestMiddleware,
   NestModule,
+  NotFoundException,
+  Param,
   Post,
+  Put,
   Req,
   UnauthorizedException,
   UseGuards,
@@ -24,9 +29,10 @@ import { NestFactory } from '@nestjs/core';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { Db, LogEvent, logEvent, verifyPassword } from './db';
+import { Db, LogEvent, logEvent, RecordInput, RecordRow, verifyPassword } from './db';
 
 const TOKEN_TTL_SECONDS = 3600;
+const VALID_PRIORITIES = ['baixa', 'media', 'alta'] as const;
 
 export interface AppConfig {
   port: number;
@@ -66,6 +72,81 @@ function apiLog(
   message: string,
 ): void {
   logEvent({ level, layer: 'api', client: 'web', operation, status, request_id: requestId, message });
+}
+
+/** Valida os campos do formulário/corpo da requisição de cadastro e edição de registros. */
+export function validateRecordInput(body: unknown): {
+  valid: boolean;
+  errors: string[];
+  data?: RecordInput;
+} {
+  const errors: string[] = [];
+  if (!body || typeof body !== 'object') {
+    return { valid: false, errors: ['Corpo da requisição deve ser um objeto JSON'] };
+  }
+
+  const raw = body as Record<string, unknown>;
+  const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+  const description = typeof raw.description === 'string' ? raw.description.trim() : '';
+  const category = typeof raw.category === 'string' ? raw.category.trim() : '';
+  const priority = typeof raw.priority === 'string' ? raw.priority.trim().toLowerCase() : '';
+  const dueDateRaw = raw.due_date;
+
+  // 1. Título (obrigatório, 3-100 caracteres)
+  if (!title) {
+    errors.push('Título é obrigatório');
+  } else if (title.length < 3 || title.length > 100) {
+    errors.push('Título deve ter entre 3 e 100 caracteres');
+  }
+
+  // 2. Descrição (obrigatória, 3-500 caracteres)
+  if (!description) {
+    errors.push('Descrição é obrigatória');
+  } else if (description.length < 3 || description.length > 500) {
+    errors.push('Descrição deve ter entre 3 e 500 caracteres');
+  }
+
+  // 3. Categoria (obrigatória, 2-50 caracteres)
+  if (!category) {
+    errors.push('Categoria é obrigatória');
+  } else if (category.length < 2 || category.length > 50) {
+    errors.push('Categoria deve ter entre 2 e 50 caracteres');
+  }
+
+  // 4. Prioridade (obrigatória, baixa | media | alta)
+  if (!priority) {
+    errors.push('Prioridade é obrigatória');
+  } else if (!VALID_PRIORITIES.includes(priority as (typeof VALID_PRIORITIES)[number])) {
+    errors.push('Prioridade deve ser baixa, media ou alta');
+  }
+
+  // 5. Data de vencimento (opcional; se informada deve ter formato YYYY-MM-DD válido)
+  let cleanDueDate: string | null = null;
+  if (dueDateRaw !== undefined && dueDateRaw !== null && String(dueDateRaw).trim() !== '') {
+    const dateStr = String(dueDateRaw).trim();
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(dateStr) || isNaN(Date.parse(dateStr))) {
+      errors.push('Data de vencimento deve estar no formato AAAA-MM-DD');
+    } else {
+      cleanDueDate = dateStr;
+    }
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors };
+  }
+
+  return {
+    valid: true,
+    errors: [],
+    data: {
+      title,
+      description,
+      category,
+      priority,
+      due_date: cleanDueDate,
+    },
+  };
 }
 
 /** Gera um request_id por requisição; o mesmo valor é repassado ao banco para correlacionar os logs. */
@@ -138,7 +219,10 @@ export class AuthGuard implements CanActivate {
 
 @Controller('api/web')
 export class WebController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    @Inject('DB') private readonly db: Db,
+  ) {}
 
   @Get('health')
   health(@Req() req: WebRequest): { status: string } {
@@ -157,6 +241,81 @@ export class WebController {
   me(@Req() req: WebRequest): { username: string } {
     apiLog(req.requestId, 'INFO', 'me', 'success', 'Sessão validada');
     return { username: req.user as string };
+  }
+
+  /** Issue #2: Cadastro de novo registro via Web (POST /api/web/records). */
+  @Post('records')
+  @HttpCode(HttpStatus.CREATED)
+  @UseGuards(AuthGuard)
+  createRecord(@Body() body: unknown, @Req() req: WebRequest): RecordRow {
+    const validation = validateRecordInput(body);
+    if (!validation.valid || !validation.data) {
+      apiLog(req.requestId, 'WARN', 'create_record', 'error', 'Falha de validação ao criar registro');
+      throw new BadRequestException({ message: 'Dados inválidos', errors: validation.errors });
+    }
+
+    const record = this.db.createRecord(validation.data, req.requestId, 'web');
+    apiLog(req.requestId, 'INFO', 'create_record', 'success', `Registro ${record.id} criado com sucesso`);
+    return record;
+  }
+
+  /** Issue #2: Edição de registro existente via Web (PUT /api/web/records/{id}). */
+  @Put('records/:id')
+  @UseGuards(AuthGuard)
+  updateRecord(
+    @Param('id') idParam: string,
+    @Body() body: unknown,
+    @Req() req: WebRequest,
+  ): RecordRow {
+    const id = Number(idParam);
+    if (isNaN(id) || id <= 0) {
+      apiLog(req.requestId, 'WARN', 'update_record', 'error', 'ID de registro inválido');
+      throw new BadRequestException('ID de registro deve ser um número positivo');
+    }
+
+    const validation = validateRecordInput(body);
+    if (!validation.valid || !validation.data) {
+      apiLog(req.requestId, 'WARN', 'update_record', 'error', 'Falha de validação ao atualizar registro');
+      throw new BadRequestException({ message: 'Dados inválidos', errors: validation.errors });
+    }
+
+    const updated = this.db.updateRecord(id, validation.data, req.requestId, 'web');
+    if (!updated) {
+      apiLog(req.requestId, 'WARN', 'update_record', 'error', `Registro ${id} não encontrado`);
+      throw new NotFoundException(`Registro ${id} não encontrado`);
+    }
+
+    apiLog(req.requestId, 'INFO', 'update_record', 'success', `Registro ${id} atualizado com sucesso`);
+    return updated;
+  }
+
+  /** Consulta de registro específico por id (suporte ao formulário de edição). */
+  @Get('records/:id')
+  @UseGuards(AuthGuard)
+  getRecord(@Param('id') idParam: string, @Req() req: WebRequest): RecordRow {
+    const id = Number(idParam);
+    if (isNaN(id) || id <= 0) {
+      apiLog(req.requestId, 'WARN', 'select_record', 'error', 'ID de registro inválido');
+      throw new BadRequestException('ID de registro deve ser um número positivo');
+    }
+
+    const record = this.db.findRecordById(id, req.requestId, 'web');
+    if (!record) {
+      apiLog(req.requestId, 'WARN', 'select_record', 'error', `Registro ${id} não encontrado`);
+      throw new NotFoundException(`Registro ${id} não encontrado`);
+    }
+
+    apiLog(req.requestId, 'INFO', 'select_record', 'success', `Registro ${id} consultado`);
+    return record;
+  }
+
+  /** Listagem dos registros existentes (para visualização imediata dos dados persistidos). */
+  @Get('records')
+  @UseGuards(AuthGuard)
+  listRecords(@Req() req: WebRequest): RecordRow[] {
+    const records = this.db.listRecords(req.requestId, 'web');
+    apiLog(req.requestId, 'INFO', 'list_records', 'success', `${records.length} registro(s) consultado(s)`);
+    return records;
   }
 }
 

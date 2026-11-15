@@ -6,44 +6,107 @@
   <title>To-Do List</title>
   <style>
     :root {
-      --bg: #f1f5f9; --card: #ffffff; --text: #0f172a; --muted: #64748b;
+      --bg: #f8fafc; --card: #ffffff; --text: #0f172a; --muted: #64748b;
       --primary: #4f46e5; --primary-dark: #4338ca; --border: #e2e8f0;
       --danger-bg: #fef2f2; --danger-text: #b91c1c; --danger-border: #fecaca;
+      --success-bg: #f0fdf4; --success-text: #15803d; --success-border: #bbf7d0;
+      --badge-alta: #fee2e2; --badge-alta-text: #991b1b;
+      --badge-media: #fef3c7; --badge-media-text: #92400e;
+      --badge-baixa: #e0f2fe; --badge-baixa-text: #075985;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      display: flex; align-items: center; justify-content: center; padding: 16px;
+      padding: 24px 16px; display: flex; justify-content: center;
     }
+    .container { width: 100%; max-width: 800px; margin: 0 auto; }
     .card {
-      width: 100%; max-width: 400px; background: var(--card); border: 1px solid var(--border);
-      border-radius: 16px; padding: 32px; box-shadow: 0 10px 30px rgba(15, 23, 42, .08);
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 28px; box-shadow: 0 10px 25px rgba(15, 23, 42, .06);
+      margin-bottom: 24px;
     }
-    h1 { margin: 0 0 4px; font-size: 1.6rem; }
-    .subtitle { margin: 0 0 24px; color: var(--muted); font-size: .95rem; }
-    label { display: block; margin-bottom: 14px; font-size: .85rem; font-weight: 600; }
-    input {
-      width: 100%; margin-top: 6px; padding: 10px 12px; font-size: 1rem;
+    .auth-card { max-width: 420px; margin: 60px auto 0; }
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border);
+    }
+    h1 { margin: 0; font-size: 1.6rem; color: #1e1b4b; }
+    h2 { margin: 0 0 16px; font-size: 1.25rem; }
+    .subtitle { margin: 4px 0 20px; color: var(--muted); font-size: .95rem; }
+    .user-info { display: flex; align-items: center; gap: 12px; }
+    .user-name { font-weight: 600; color: var(--text); font-size: 0.95rem; }
+
+    .form-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    }
+    .form-group-full { grid-column: span 2; }
+    @media (max-width: 640px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .form-group-full { grid-column: span 1; }
+    }
+
+    label { display: block; margin-bottom: 6px; font-size: .85rem; font-weight: 600; color: #334155; }
+    .required { color: var(--danger-text); margin-left: 2px; }
+    input, textarea, select {
+      width: 100%; padding: 10px 12px; font-size: .95rem;
       border: 1px solid var(--border); border-radius: 8px; outline: none;
+      background: #fff; font-family: inherit; transition: border-color .15s;
     }
-    input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79, 70, 229, .15); }
+    textarea { resize: vertical; min-height: 80px; }
+    input:focus, textarea:focus, select:focus {
+      border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79, 70, 229, .15);
+    }
+    .input-error { border-color: var(--danger-text) !important; background: #fffdfd; }
+    .field-hint { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+
+    .button-group { display: flex; gap: 12px; margin-top: 20px; }
     button {
-      width: 100%; padding: 11px; font-size: 1rem; font-weight: 600; color: #fff;
+      padding: 10px 18px; font-size: .95rem; font-weight: 600; color: #fff;
       background: var(--primary); border: 0; border-radius: 8px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      transition: background .15s;
     }
     button:hover { background: var(--primary-dark); }
     button:disabled { opacity: .6; cursor: not-allowed; }
-    button.secondary { background: transparent; color: var(--primary); border: 1px solid var(--primary); }
-    button.secondary:hover { background: #eef2ff; }
-    .error {
-      margin-bottom: 14px; padding: 10px 12px; font-size: .9rem; border-radius: 8px;
+    button.secondary {
+      background: transparent; color: var(--muted); border: 1px solid var(--border);
+    }
+    button.secondary:hover { background: #f1f5f9; color: var(--text); }
+    button.small { padding: 6px 12px; font-size: .85rem; }
+
+    .alert {
+      padding: 12px 16px; border-radius: 8px; margin-bottom: 18px; font-size: .9rem;
+    }
+    .alert-danger {
       background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border);
     }
-    .welcome { margin: 0 0 20px; font-size: 1rem; }
-    .placeholder {
-      margin-bottom: 20px; padding: 16px; border: 1px dashed var(--border);
-      border-radius: 8px; color: var(--muted); font-size: .9rem; text-align: center;
+    .alert-success {
+      background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border);
+    }
+    .alert ul { margin: 6px 0 0; padding-left: 20px; }
+
+    .badge {
+      display: inline-block; padding: 3px 8px; border-radius: 9999px; font-size: 0.75rem;
+      font-weight: 600; text-transform: uppercase;
+    }
+    .badge-alta { background: var(--badge-alta); color: var(--badge-alta-text); }
+    .badge-media { background: var(--badge-media); color: var(--badge-media-text); }
+    .badge-baixa { background: var(--badge-baixa); color: var(--badge-baixa-text); }
+    .badge-cat { background: #f1f5f9; color: #475569; }
+
+    .record-card {
+      background: #fff; border: 1px solid var(--border); border-radius: 12px;
+      padding: 18px; margin-bottom: 12px; display: flex; justify-content: space-between;
+      align-items: flex-start; gap: 16px; transition: border-color .15s;
+    }
+    .record-card:hover { border-color: #cbd5e1; }
+    .record-title { margin: 0 0 6px; font-size: 1.05rem; font-weight: 600; }
+    .record-desc { margin: 0 0 10px; color: #475569; font-size: .9rem; line-height: 1.4; }
+    .record-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: .8rem; color: var(--muted); }
+    .empty-state {
+      text-align: center; padding: 40px 20px; color: var(--muted);
+      border: 1px dashed var(--border); border-radius: 12px;
     }
   </style>
 </head>
@@ -57,7 +120,6 @@
   <script type="text/babel">
     const { useState, useEffect } = React;
 
-    // sessionStorage pode falhar em alguns contextos; tudo funciona sem ele.
     function readToken() {
       try { return sessionStorage.getItem('token'); } catch (e) { return null; }
     }
@@ -79,17 +141,17 @@
         setError('');
         setLoading(true);
         try {
-          const response = await fetch('/api/web/login', {
+          const res = await fetch('/api/web/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password }),
           });
-          if (response.status === 401) {
+          if (res.status === 401) {
             setError('Usuário ou senha inválidos.');
-          } else if (!response.ok) {
+          } else if (!res.ok) {
             setError('Não foi possível entrar. Tente novamente.');
           } else {
-            const data = await response.json();
+            const data = await res.json();
             onLogin(data.token);
           }
         } catch (e) {
@@ -100,36 +162,335 @@
       }
 
       return (
-        <form onSubmit={handleSubmit}>
-          <h1>To-Do List</h1>
-          <p className="subtitle">Entre para continuar</p>
-          {error && <div className="error" role="alert">{error}</div>}
-          <label>
-            Usuário
-            <input
-              type="text" value={username} autoComplete="username" required
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </label>
-          <label>
-            Senha
-            <input
-              type="password" value={password} autoComplete="current-password" required
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </label>
-          <button type="submit" disabled={loading}>{loading ? 'Entrando...' : 'Entrar'}</button>
-        </form>
+        <div className="card auth-card">
+          <form onSubmit={handleSubmit}>
+            <h1>To-Do List</h1>
+            <p className="subtitle">Entre para gerenciar suas tarefas</p>
+            {error && <div className="alert alert-danger" role="alert">{error}</div>}
+            <div style={{ marginBottom: 14 }}>
+              <label>Usuário <span className="required">*</span></label>
+              <input
+                type="text" value={username} autoComplete="username" required
+                placeholder="Ex: admin"
+                onChange={(e) => setUsername(e.target.value)}
+              />
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <label>Senha <span className="required">*</span></label>
+              <input
+                type="password" value={password} autoComplete="current-password" required
+                placeholder="••••••••"
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            <button type="submit" disabled={loading} style={{ width: '100%' }}>
+              {loading ? 'Entrando...' : 'Entrar no Sistema'}
+            </button>
+          </form>
+        </div>
       );
     }
 
-    function Home({ username, onLogout }) {
+    function RecordForm({ editingRecord, onSaved, onCancel, token }) {
+      const [title, setTitle] = useState('');
+      const [description, setDescription] = useState('');
+      const [category, setCategory] = useState('Trabalho');
+      const [priority, setPriority] = useState('media');
+      const [dueDate, setDueDate] = useState('');
+      const [errors, setErrors] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [successMsg, setSuccessMsg] = useState('');
+
+      useEffect(() => {
+        if (editingRecord) {
+          setTitle(editingRecord.title || '');
+          setDescription(editingRecord.description || '');
+          setCategory(editingRecord.category || 'Trabalho');
+          setPriority(editingRecord.priority || 'media');
+          setDueDate(editingRecord.due_date ? editingRecord.due_date.slice(0, 10) : '');
+          setErrors([]);
+          setSuccessMsg('');
+        } else {
+          resetForm();
+        }
+      }, [editingRecord]);
+
+      function resetForm() {
+        setTitle('');
+        setDescription('');
+        setCategory('Trabalho');
+        setPriority('media');
+        setDueDate('');
+        setErrors([]);
+      }
+
+      function validateClient() {
+        const clientErrors = [];
+        if (!title.trim() || title.trim().length < 3 || title.trim().length > 100) {
+          clientErrors.push('Título deve ter entre 3 e 100 caracteres');
+        }
+        if (!description.trim() || description.trim().length < 3 || description.trim().length > 500) {
+          clientErrors.push('Descrição deve ter entre 3 e 500 caracteres');
+        }
+        if (!category.trim() || category.trim().length < 2 || category.trim().length > 50) {
+          clientErrors.push('Categoria deve ter entre 2 e 50 caracteres');
+        }
+        if (!['baixa', 'media', 'alta'].includes(priority)) {
+          clientErrors.push('Selecione uma prioridade válida (baixa, média ou alta)');
+        }
+        if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+          clientErrors.push('Data de vencimento deve estar no formato AAAA-MM-DD');
+        }
+        return clientErrors;
+      }
+
+      async function handleSubmit(e) {
+        e.preventDefault();
+        setSuccessMsg('');
+        const clientErrors = validateClient();
+        if (clientErrors.length > 0) {
+          setErrors(clientErrors);
+          return;
+        }
+
+        setLoading(true);
+        setErrors([]);
+
+        const payload = {
+          title: title.trim(),
+          description: description.trim(),
+          category: category.trim(),
+          priority,
+          due_date: dueDate ? dueDate : null,
+        };
+
+        const isEditing = Boolean(editingRecord && editingRecord.id);
+        const url = isEditing ? `/api/web/records/${editingRecord.id}` : '/api/web/records';
+        const method = isEditing ? 'PUT' : 'POST';
+
+        try {
+          const res = await fetch(url, {
+            method,
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(payload),
+          });
+
+          const data = await res.json();
+          if (!res.ok) {
+            if (data.errors && Array.isArray(data.errors)) {
+              setErrors(data.errors);
+            } else {
+              setErrors([data.message || 'Erro ao processar formulário']);
+            }
+          } else {
+            setSuccessMsg(isEditing ? 'Tarefa atualizada com sucesso!' : 'Tarefa criada com sucesso!');
+            if (!isEditing) resetForm();
+            onSaved(data);
+          }
+        } catch (err) {
+          setErrors(['Não foi possível conectar à API. Verifique sua conexão.']);
+        } finally {
+          setLoading(false);
+        }
+      }
+
       return (
-        <div>
-          <h1>To-Do List</h1>
-          <p className="welcome">Olá, <strong>{username}</strong>! Você está logado.</p>
-          <div className="placeholder">As tarefas aparecerão aqui nas próximas etapas do projeto.</div>
-          <button className="secondary" onClick={onLogout}>Sair</button>
+        <div className="card" id="form-section">
+          <h2>{editingRecord ? `Editar Tarefa #${editingRecord.id}` : 'Nova Tarefa'}</h2>
+          <p className="subtitle">Preencha os campos obrigatórios (*) para salvar os dados.</p>
+
+          {successMsg && <div className="alert alert-success">{successMsg}</div>}
+          {errors.length > 0 && (
+            <div className="alert alert-danger" role="alert">
+              <strong>Corrija os erros abaixo:</strong>
+              <ul>
+                {errors.map((err, i) => <li key={i}>{err}</li>)}
+              </ul>
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit}>
+            <div className="form-grid">
+              <div className="form-group-full">
+                <label>Título da Tarefa <span className="required">*</span></label>
+                <input
+                  type="text"
+                  placeholder="Ex: Implementar autenticação e testes"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className={errors.some(e => e.includes('Título')) ? 'input-error' : ''}
+                />
+                <div className="field-hint">Mínimo 3 e máximo 100 caracteres.</div>
+              </div>
+
+              <div className="form-group-full">
+                <label>Descrição Detalhada <span className="required">*</span></label>
+                <textarea
+                  placeholder="Ex: Detalhes do escopo e requisitos de entrega..."
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className={errors.some(e => e.includes('Descrição')) ? 'input-error' : ''}
+                />
+                <div className="field-hint">Mínimo 3 e máximo 500 caracteres.</div>
+              </div>
+
+              <div>
+                <label>Categoria <span className="required">*</span></label>
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  className={errors.some(e => e.includes('Categoria')) ? 'input-error' : ''}
+                >
+                  <option value="Trabalho">Trabalho</option>
+                  <option value="Estudo">Estudo</option>
+                  <option value="Pessoal">Pessoal</option>
+                  <option value="Projetos">Projetos</option>
+                  <option value="Geral">Geral</option>
+                </select>
+              </div>
+
+              <div>
+                <label>Prioridade <span className="required">*</span></label>
+                <select
+                  value={priority}
+                  onChange={(e) => setPriority(e.target.value)}
+                  className={errors.some(e => e.includes('Prioridade')) ? 'input-error' : ''}
+                >
+                  <option value="baixa">Baixa</option>
+                  <option value="media">Média</option>
+                  <option value="alta">Alta</option>
+                </select>
+              </div>
+
+              <div className="form-group-full">
+                <label>Data de Vencimento (Prazo)</label>
+                <input
+                  type="date"
+                  value={dueDate}
+                  onChange={(e) => setDueDate(e.target.value)}
+                  className={errors.some(e => e.includes('vencimento')) ? 'input-error' : ''}
+                />
+                <div className="field-hint">Opcional. Formato AAAA-MM-DD.</div>
+              </div>
+            </div>
+
+            <div className="button-group">
+              <button type="submit" disabled={loading}>
+                {loading ? 'Salvando...' : editingRecord ? 'Salvar Alterações' : 'Cadastrar Tarefa'}
+              </button>
+              {editingRecord && (
+                <button type="button" className="secondary" onClick={onCancel}>
+                  Cancelar Edição
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      );
+    }
+
+    function RecordsList({ records, onEdit }) {
+      if (records.length === 0) {
+        return (
+          <div className="card">
+            <h2>Tarefas Persistidas</h2>
+            <div className="empty-state">
+              Nenhuma tarefa cadastrada ainda. Utilize o formulário acima para adicionar a primeira!
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="card">
+          <h2>Tarefas Persistidas ({records.length})</h2>
+          <div className="subtitle">Dados recuperados do banco SQLite através da API.</div>
+          {records.map((rec) => (
+            <div key={rec.id} className="record-card">
+              <div style={{ flex: 1 }}>
+                <h3 className="record-title">#{rec.id} — {rec.title}</h3>
+                <p className="record-desc">{rec.description}</p>
+                <div className="record-meta">
+                  <span className="badge badge-cat">{rec.category}</span>
+                  <span className={`badge badge-${rec.priority}`}>
+                    {rec.priority === 'alta' ? 'Alta' : rec.priority === 'media' ? 'Média' : 'Baixa'}
+                  </span>
+                  {rec.due_date && <span>📅 Prazo: {rec.due_date}</span>}
+                  <span>🕒 Atualizado em: {new Date(rec.updated_at).toLocaleString('pt-BR')}</span>
+                </div>
+              </div>
+              <div>
+                <button
+                  type="button"
+                  className="secondary small"
+                  onClick={() => {
+                    onEdit(rec);
+                    document.getElementById('form-section')?.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                >
+                  ✏️ Editar
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function MainApp({ username, token, onLogout }) {
+      const [records, setRecords] = useState([]);
+      const [editingRecord, setEditingRecord] = useState(null);
+
+      async function fetchRecords() {
+        try {
+          const res = await fetch('/api/web/records', {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setRecords(data);
+          }
+        } catch (e) {
+          console.error('Falha ao carregar tarefas', e);
+        }
+      }
+
+      useEffect(() => {
+        fetchRecords();
+      }, []);
+
+      function handleSaved() {
+        setEditingRecord(null);
+        fetchRecords();
+      }
+
+      return (
+        <div className="container">
+          <div className="header">
+            <div>
+              <h1>To-Do List</h1>
+              <span className="subtitle">Gestão de Tarefas Web + CLI</span>
+            </div>
+            <div className="user-info">
+              <span className="user-name">👤 {username}</span>
+              <button className="secondary small" onClick={onLogout}>Sair</button>
+            </div>
+          </div>
+
+          <RecordForm
+            editingRecord={editingRecord}
+            onSaved={handleSaved}
+            onCancel={() => setEditingRecord(null)}
+            token={token}
+          />
+
+          <RecordsList
+            records={records}
+            onEdit={(rec) => setEditingRecord(rec)}
+          />
         </div>
       );
     }
@@ -149,24 +510,27 @@
         setToken(newToken);
       }
 
-      // Valida o token na API sempre que ele muda (ex.: ao recarregar a página).
       useEffect(() => {
         if (!token) return;
         fetch('/api/web/me', { headers: { Authorization: 'Bearer ' + token } })
-          .then((response) => (response.ok ? response.json() : Promise.reject()))
+          .then((res) => (res.ok ? res.json() : Promise.reject()))
           .then((data) => setUsername(data.username))
           .catch(logout);
       }, [token]);
 
-      return (
-        <div className="card">
-          {token && username
-            ? <Home username={username} onLogout={logout} />
-            : token
-              ? <p className="subtitle">Carregando...</p>
-              : <LoginForm onLogin={login} />}
-        </div>
-      );
+      if (token && username) {
+        return <MainApp username={username} token={token} onLogout={logout} />;
+      }
+
+      if (token) {
+        return (
+          <div className="card auth-card" style={{ textAlign: 'center' }}>
+            <p className="subtitle">Carregando sessão...</p>
+          </div>
+        );
+      }
+
+      return <LoginForm onLogin={login} />;
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);

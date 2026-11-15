@@ -1,13 +1,14 @@
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
-import { AppModule, AuthService, bootstrap, loadConfig } from '../api';
+import { AppModule, AuthService, bootstrap, loadConfig, validateRecordInput } from '../api';
 import { Db } from '../db';
 
 let written: string[];
 let db: Db;
 let app: INestApplication;
 let auth: AuthService;
+let validToken: string;
 
 const logs = () => written.map((line) => JSON.parse(line));
 
@@ -21,6 +22,7 @@ beforeAll(async () => {
   app = moduleRef.createNestApplication();
   await app.init();
   auth = moduleRef.get(AuthService);
+  validToken = auth.sign('admin');
   jest.restoreAllMocks();
 });
 
@@ -144,14 +146,279 @@ describe('GET /api/web/me', () => {
   });
 
   it('responde 200 com token válido', async () => {
-    const login = await request(app.getHttpServer())
-      .post('/api/web/login')
-      .send({ username: 'admin', password: 'segredo123' });
     const res = await request(app.getHttpServer())
       .get('/api/web/me')
-      .set('Authorization', `Bearer ${login.body.token}`);
+      .set('Authorization', `Bearer ${validToken}`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ username: 'admin' });
+  });
+});
+
+describe('validateRecordInput', () => {
+  it('rejeita corpos nulos ou não objetos', () => {
+    expect(validateRecordInput(null).valid).toBe(false);
+    expect(validateRecordInput('texto').valid).toBe(false);
+  });
+
+  it('rejeita títulos curtos, longos ou ausentes', () => {
+    expect(validateRecordInput({ description: 'abc', category: 'cat', priority: 'baixa' }).errors).toContain(
+      'Título é obrigatório',
+    );
+    expect(
+      validateRecordInput({ title: 'ab', description: 'desc', category: 'cat', priority: 'baixa' }).errors,
+    ).toContain('Título deve ter entre 3 e 100 caracteres');
+    expect(
+      validateRecordInput({ title: 'a'.repeat(101), description: 'desc', category: 'cat', priority: 'baixa' }).errors,
+    ).toContain('Título deve ter entre 3 e 100 caracteres');
+  });
+
+  it('rejeita descrição curta, longa ou ausente', () => {
+    expect(validateRecordInput({ title: 'titulo', category: 'cat', priority: 'baixa' }).errors).toContain(
+      'Descrição é obrigatória',
+    );
+    expect(
+      validateRecordInput({ title: 'titulo', description: 'ab', category: 'cat', priority: 'baixa' }).errors,
+    ).toContain('Descrição deve ter entre 3 e 500 caracteres');
+    expect(
+      validateRecordInput({ title: 'titulo', description: 'a'.repeat(501), category: 'cat', priority: 'baixa' }).errors,
+    ).toContain('Descrição deve ter entre 3 e 500 caracteres');
+  });
+
+  it('rejeita categoria inválida ou ausente', () => {
+    expect(validateRecordInput({ title: 'titulo', description: 'desc', priority: 'baixa' }).errors).toContain(
+      'Categoria é obrigatória',
+    );
+    expect(
+      validateRecordInput({ title: 'titulo', description: 'desc', category: 'x', priority: 'baixa' }).errors,
+    ).toContain('Categoria deve ter entre 2 e 50 caracteres');
+    expect(
+      validateRecordInput({ title: 'titulo', description: 'desc', category: 'c'.repeat(51), priority: 'baixa' }).errors,
+    ).toContain('Categoria deve ter entre 2 e 50 caracteres');
+  });
+
+  it('rejeita prioridade ausente ou fora do enum permitido', () => {
+    expect(validateRecordInput({ title: 'titulo', description: 'desc', category: 'cat' }).errors).toContain(
+      'Prioridade é obrigatória',
+    );
+    expect(
+      validateRecordInput({ title: 'titulo', description: 'desc', category: 'cat', priority: 'urgente' }).errors,
+    ).toContain('Prioridade deve ser baixa, media ou alta');
+  });
+
+  it('rejeita formato de data de vencimento inválido', () => {
+    expect(
+      validateRecordInput({
+        title: 'titulo',
+        description: 'desc',
+        category: 'cat',
+        priority: 'alta',
+        due_date: '31/12/2026',
+      }).errors,
+    ).toContain('Data de vencimento deve estar no formato AAAA-MM-DD');
+
+    expect(
+      validateRecordInput({
+        title: 'titulo',
+        description: 'desc',
+        category: 'cat',
+        priority: 'alta',
+        due_date: '2026-99-99',
+      }).errors,
+    ).toContain('Data de vencimento deve estar no formato AAAA-MM-DD');
+  });
+
+  it('aceita dados válidos com data ou sem data', () => {
+    const withDate = validateRecordInput({
+      title: 'Minha Tarefa',
+      description: 'Descrição completa',
+      category: 'Estudo',
+      priority: 'alta',
+      due_date: '2026-12-31',
+    });
+    expect(withDate.valid).toBe(true);
+    expect(withDate.data?.due_date).toBe('2026-12-31');
+
+    const withoutDate = validateRecordInput({
+      title: 'Minha Tarefa',
+      description: 'Descrição completa',
+      category: 'Estudo',
+      priority: 'alta',
+      due_date: '   ',
+    });
+    expect(withoutDate.valid).toBe(true);
+    expect(withoutDate.data?.due_date).toBeNull();
+  });
+});
+
+describe('POST /api/web/records (Cadastro)', () => {
+  it('rejeita requisições sem autenticação com HTTP 401', async () => {
+    const res = await request(app.getHttpServer()).post('/api/web/records').send({ title: 'Teste' });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejeita dados inválidos com HTTP 400 e lista os erros', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/web/records')
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({ title: 'a' });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toBeDefined();
+    expect(Array.isArray(res.body.errors)).toBe(true);
+  });
+
+  it('cria uma nova tarefa com HTTP 201 e correlaciona logs de api e db', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/web/records')
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({
+        title: 'Configurar Docker',
+        description: 'Configurar compose para os testes',
+        category: 'DevOps',
+        priority: 'alta',
+        due_date: '2026-11-30',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBeDefined();
+    expect(res.body.title).toBe('Configurar Docker');
+    expect(res.body.category).toBe('DevOps');
+
+    const requestId = res.headers['x-request-id'];
+    const apiLog = logs().find((l) => l.layer === 'api' && l.operation === 'create_record');
+    const dbLog = logs().find((l) => l.layer === 'db' && l.operation === 'insert_record');
+
+    expect(apiLog).toMatchObject({
+      status: 'success',
+      client: 'web',
+      request_id: requestId,
+    });
+    expect(dbLog).toMatchObject({
+      status: 'success',
+      client: 'web',
+      request_id: requestId,
+    });
+  });
+});
+
+describe('PUT /api/web/records/:id (Edição)', () => {
+  let createdId: number;
+
+  beforeEach(async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/web/records')
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({
+        title: 'Tarefa para Edição',
+        description: 'Descrição prévia',
+        category: 'Trabalho',
+        priority: 'media',
+      });
+    createdId = res.body.id;
+  });
+
+  it('rejeita com HTTP 401 sem autenticação', async () => {
+    const res = await request(app.getHttpServer()).put(`/api/web/records/${createdId}`).send({});
+    expect(res.status).toBe(401);
+  });
+
+  it('rejeita com HTTP 400 para ID inválido', async () => {
+    const res = await request(app.getHttpServer())
+      .put('/api/web/records/abc')
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({});
+    expect(res.status).toBe(400);
+  });
+
+  it('rejeita com HTTP 400 para dados inválidos', async () => {
+    const res = await request(app.getHttpServer())
+      .put(`/api/web/records/${createdId}`)
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({ title: '' });
+    expect(res.status).toBe(400);
+  });
+
+  it('retorna HTTP 404 para ID inexistente', async () => {
+    const res = await request(app.getHttpServer())
+      .put('/api/web/records/999999')
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({
+        title: 'Titulo Valido',
+        description: 'Descricao Valida',
+        category: 'Trabalho',
+        priority: 'baixa',
+      });
+    expect(res.status).toBe(404);
+  });
+
+  it('atualiza a tarefa com sucesso com HTTP 200 e correlaciona logs', async () => {
+    const res = await request(app.getHttpServer())
+      .put(`/api/web/records/${createdId}`)
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({
+        title: 'Tarefa Editada com Sucesso',
+        description: 'Nova descrição atualizada',
+        category: 'Estudo',
+        priority: 'alta',
+        due_date: '2026-12-25',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(createdId);
+    expect(res.body.title).toBe('Tarefa Editada com Sucesso');
+    expect(res.body.priority).toBe('alta');
+    expect(res.body.due_date).toBe('2026-12-25');
+
+    const requestId = res.headers['x-request-id'];
+    const apiLog = logs().find((l) => l.layer === 'api' && l.operation === 'update_record' && l.status === 'success');
+    const dbLog = logs().find((l) => l.layer === 'db' && l.operation === 'update_record' && l.status === 'success');
+    expect(apiLog).toMatchObject({ request_id: requestId, client: 'web' });
+    expect(dbLog).toMatchObject({ request_id: requestId, client: 'web' });
+  });
+});
+
+describe('GET /api/web/records e /api/web/records/:id', () => {
+  it('exige autenticação nas rotas de consulta', async () => {
+    const resList = await request(app.getHttpServer()).get('/api/web/records');
+    expect(resList.status).toBe(401);
+
+    const resItem = await request(app.getHttpServer()).get('/api/web/records/1');
+    expect(resItem.status).toBe(401);
+  });
+
+  it('lista registros cadastrados com HTTP 200', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/web/records')
+      .set('Authorization', `Bearer ${validToken}`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('busca registro por ID com HTTP 200 e trata 404 e 400', async () => {
+    const created = await request(app.getHttpServer())
+      .post('/api/web/records')
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({
+        title: 'Buscar Por ID',
+        description: 'Descricao da busca',
+        category: 'Projetos',
+        priority: 'baixa',
+      });
+
+    const res = await request(app.getHttpServer())
+      .get(`/api/web/records/${created.body.id}`)
+      .set('Authorization', `Bearer ${validToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.title).toBe('Buscar Por ID');
+
+    const notFound = await request(app.getHttpServer())
+      .get('/api/web/records/888888')
+      .set('Authorization', `Bearer ${validToken}`);
+    expect(notFound.status).toBe(404);
+
+    const badId = await request(app.getHttpServer())
+      .get('/api/web/records/invalido')
+      .set('Authorization', `Bearer ${validToken}`);
+    expect(badId.status).toBe(400);
   });
 });
 
