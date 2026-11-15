@@ -19,6 +19,25 @@ export interface UserRow {
   password_hash: string;
 }
 
+export interface RecordRow {
+  id: number;
+  title: string;
+  description: string;
+  category: string;
+  priority: string;
+  due_date: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordInput {
+  title: string;
+  description: string;
+  category: string;
+  priority: string;
+  due_date?: string | null;
+}
+
 /** Escreve um evento de log: uma linha JSON no stdout (visível em `docker compose logs`). */
 export function logEvent(event: LogEvent): void {
   process.stdout.write(JSON.stringify({ timestamp: new Date().toISOString(), ...event }) + '\n');
@@ -49,7 +68,17 @@ export class Db {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL
-      )`,
+      );
+      CREATE TABLE IF NOT EXISTS records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        category TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        due_date TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );`,
     );
   }
 
@@ -87,6 +116,116 @@ export class Db {
       message: row ? 'Usuário encontrado' : 'Usuário não encontrado',
     });
     return row;
+  }
+
+  /** Insere um novo registro (tarefa) e registra o log na camada db. */
+  createRecord(data: RecordInput, requestId: string, client: 'web' | 'cli'): RecordRow {
+    const now = new Date().toISOString();
+    const dueDate = data.due_date ? String(data.due_date).trim() : null;
+    const stmt = this.conn.prepare(
+      `INSERT INTO records (title, description, category, priority, due_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const info = stmt.run(
+      data.title.trim(),
+      data.description.trim(),
+      data.category.trim(),
+      data.priority.trim(),
+      dueDate,
+      now,
+      now,
+    );
+    const record = this.conn
+      .prepare('SELECT * FROM records WHERE id = ?')
+      .get(info.lastInsertRowid) as RecordRow;
+
+    logEvent({
+      level: 'INFO',
+      layer: 'db',
+      client,
+      operation: 'insert_record',
+      status: 'success',
+      request_id: requestId,
+      message: `Registro ${record.id} inserido com sucesso`,
+    });
+    return record;
+  }
+
+  /** Atualiza um registro existente e registra o log na camada db. */
+  updateRecord(id: number, data: RecordInput, requestId: string, client: 'web' | 'cli'): RecordRow | undefined {
+    const existing = this.conn.prepare('SELECT id FROM records WHERE id = ?').get(id);
+    if (!existing) {
+      logEvent({
+        level: 'WARN',
+        layer: 'db',
+        client,
+        operation: 'update_record',
+        status: 'error',
+        request_id: requestId,
+        message: `Registro ${id} não encontrado para atualização`,
+      });
+      return undefined;
+    }
+
+    const now = new Date().toISOString();
+    const dueDate = data.due_date ? String(data.due_date).trim() : null;
+    this.conn
+      .prepare(
+        `UPDATE records
+         SET title = ?, description = ?, category = ?, priority = ?, due_date = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        data.title.trim(),
+        data.description.trim(),
+        data.category.trim(),
+        data.priority.trim(),
+        dueDate,
+        now,
+        id,
+      );
+
+    const updated = this.conn.prepare('SELECT * FROM records WHERE id = ?').get(id) as RecordRow;
+    logEvent({
+      level: 'INFO',
+      layer: 'db',
+      client,
+      operation: 'update_record',
+      status: 'success',
+      request_id: requestId,
+      message: `Registro ${id} atualizado com sucesso`,
+    });
+    return updated;
+  }
+
+  /** Busca um registro pelo id. */
+  findRecordById(id: number, requestId: string, client: 'web' | 'cli'): RecordRow | undefined {
+    const row = this.conn.prepare('SELECT * FROM records WHERE id = ?').get(id) as RecordRow | undefined;
+    logEvent({
+      level: 'INFO',
+      layer: 'db',
+      client,
+      operation: 'select_record',
+      status: 'success',
+      request_id: requestId,
+      message: row ? `Registro ${id} encontrado` : `Registro ${id} não encontrado`,
+    });
+    return row;
+  }
+
+  /** Lista todos os registros ordenados pelos mais recentes. */
+  listRecords(requestId: string, client: 'web' | 'cli'): RecordRow[] {
+    const rows = this.conn.prepare('SELECT * FROM records ORDER BY id DESC').all() as RecordRow[];
+    logEvent({
+      level: 'INFO',
+      layer: 'db',
+      client,
+      operation: 'list_records',
+      status: 'success',
+      request_id: requestId,
+      message: `${rows.length} registro(s) retornado(s)`,
+    });
+    return rows;
   }
 
   close(): void {
