@@ -312,3 +312,143 @@ describe('run: update (edição de tarefa)', () => {
   });
 });
 });
+
+describe('run: list (listagem paginada e ordenada)', () => {
+  const page = (items: unknown[], extra: Record<string, unknown> = {}) =>
+    reply(200, { items, total: items.length, page: 1, limit: 5, totalPages: 1, ...extra });
+
+  it('chama GET /api/cli/records com o Bearer token e sem query quando não há opções', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(page([]));
+
+    expect(await run(['list'], { TODO_TOKEN: 'token-teste' }, c.io, fetchFn)).toBe(0);
+    expect(fetchFn.mock.calls[0][0]).toBe('http://localhost:3000/api/cli/records');
+    expect(fetchFn.mock.calls[0][1].method).toBe('GET');
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBe('Bearer token-teste');
+  });
+
+  it('envia page, limit, sort e order na query string', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(page([]));
+
+    await run(['list', '--page', '2', '--limit=10', '--sort', 'title', '--order', 'asc', '--token', 'abc'], {}, capture().io, fetchFn);
+    const url = new URL(fetchFn.mock.calls[0][0]);
+    expect(url.pathname).toBe('/api/cli/records');
+    expect(Object.fromEntries(url.searchParams)).toEqual({ page: '2', limit: '10', sort: 'title', order: 'asc' });
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBe('Bearer abc');
+  });
+
+  it('mostra a tabela com as colunas alinhadas e o resumo da página', async () => {
+    const c = capture();
+    const items = [
+      { id: 12, title: 'Preparar apresentação', category: 'Estudo', priority: 'alta', due_date: '2026-12-30' },
+      { id: 9, title: 'Comprar café', category: 'Pessoal', priority: 'baixa', due_date: null },
+    ];
+    const fetchFn = jest.fn().mockResolvedValue(page(items, { total: 7, page: 2, totalPages: 2 }));
+
+    expect(await run(['list', '--token', 'abc'], {}, c.io, fetchFn)).toBe(0);
+    expect(c.out).toEqual([
+      [
+        'ID  PRIORIDADE  CATEGORIA  PRAZO       TÍTULO',
+        '12  alta        Estudo     2026-12-30  Preparar apresentação',
+        '9   baixa       Pessoal    -           Comprar café',
+        'Página 2 de 2 (total: 7)',
+      ].join('\n'),
+    ]);
+  });
+
+  it('avisa quando não há tarefas', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(page([], { totalPages: 1 }));
+
+    expect(await run(['list', '--token', 'abc'], {}, c.io, fetchFn)).toBe(0);
+    expect(c.out).toEqual(['Nenhuma tarefa encontrada.\nPágina 1 de 1 (total: 0)']);
+  });
+
+  it('trata resposta sem a lista de itens como página vazia', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { total: 0, page: 1, totalPages: 1 }));
+
+    expect(await run(['list', '--token', 'abc'], {}, c.io, fetchFn)).toBe(0);
+    expect(c.out[0]).toContain('Nenhuma tarefa encontrada.');
+  });
+
+  it('sem token ainda chama a API, que responde 401, e retorna 1', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(401, { message: 'Unauthorized' }));
+
+    expect(await run(['list'], { TODO_TOKEN: '' }, c.io, fetchFn)).toBe(1);
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBeUndefined();
+    expect(c.err).toEqual(['Erro HTTP 401 - Unauthorized']);
+  });
+
+  it('mostra os motivos quando a API rejeita os parâmetros', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(
+      reply(400, { message: 'Parâmetros inválidos', errors: ['Limite deve ser um número inteiro de 1 a 100', 'Direção da ordenação deve ser asc ou desc'] }),
+    );
+
+    expect(await run(['list', '--limit', '500', '--order', 'up', '--token', 'abc'], {}, c.io, fetchFn)).toBe(1);
+    expect(c.err).toEqual([
+      'Erro HTTP 400 - Parâmetros inválidos: Limite deve ser um número inteiro de 1 a 100; Direção da ordenação deve ser asc ou desc',
+    ]);
+  });
+});
+
+describe('run: delete (exclusão por identificador)', () => {
+  it('envia DELETE para /api/cli/records/{id} com o Bearer token e confirma a exclusão', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { message: 'Registro excluído com sucesso', id: 7 }));
+
+    expect(await run(['delete', '--id', '7'], { TODO_TOKEN: 'token-teste' }, c.io, fetchFn)).toBe(0);
+    expect(fetchFn.mock.calls[0][0]).toBe('http://localhost:3000/api/cli/records/7');
+    expect(fetchFn.mock.calls[0][1].method).toBe('DELETE');
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBe('Bearer token-teste');
+    expect(c.out).toEqual(['Tarefa #7 excluída com sucesso.']);
+  });
+
+  it('aceita o atalho -i e o token pela opção --token', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, {}));
+
+    expect(await run(['delete', '-i', '3', '--token', 'manual'], {}, capture().io, fetchFn)).toBe(0);
+    expect(fetchFn.mock.calls[0][0]).toBe('http://localhost:3000/api/cli/records/3');
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBe('Bearer manual');
+  });
+
+  it.each([[[]], [['--id', 'abc']], [['--id', '0']], [['--id', '-2']], [['--id', '1.5']]])(
+    'retorna 2 sem chamar a API quando o ID é inválido (%j)',
+    async (flags) => {
+      const c = capture();
+      const fetchFn = jest.fn();
+
+      expect(await run(['delete', ...flags, '--token', 'abc'], {}, c.io, fetchFn as unknown as FetchFn)).toBe(2);
+      expect(c.err).toEqual(['Informe o ID da tarefa a excluir usando --id.']);
+      expect(fetchFn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retorna 1 quando a tarefa não existe', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(404, { message: 'Registro 99 não encontrado' }));
+
+    expect(await run(['delete', '--id', '99', '--token', 'abc'], {}, c.io, fetchFn)).toBe(1);
+    expect(c.err).toEqual(['Erro HTTP 404 - Registro 99 não encontrado']);
+    expect(c.out).toEqual([]);
+  });
+
+  it('sem token a API responde 401 e a CLI retorna 1', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(401, { message: 'Unauthorized' }));
+
+    expect(await run(['delete', '--id', '4'], { TODO_TOKEN: '' }, c.io, fetchFn)).toBe(1);
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBeUndefined();
+    expect(c.err).toEqual(['Erro HTTP 401 - Unauthorized']);
+  });
+});
+
+describe('run: ajuda lista os comandos da issue #9', () => {
+  it('menciona list, delete e as opções de paginação e ordenação', () => {
+    for (const text of ['list', 'delete', '--page', '--limit', '--sort', '--order']) {
+      expect(USAGE).toContain(text);
+    }
+  });
+});

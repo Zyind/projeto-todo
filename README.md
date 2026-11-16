@@ -11,7 +11,7 @@ Projeto da avaliação prática de Git e GitHub. Lista de tarefas com Web (React
 | `index.html` | Toda a Web (HTML, CSS e React via CDN embutidos): login, cadastro/edição, tabela e busca avançada |
 | `api.ts` | API NestJS: endpoints, autenticação e logs da API |
 | `db.ts` | Acesso ao SQLite e logs da camada de banco |
-| `cli.ts` | CLI: fala só com a API (`/api/cli/*`), nunca com o banco (issues #7 e #8) |
+| `cli.ts` | CLI: fala só com a API (`/api/cli/*`), nunca com o banco (issues #7, #8 e #9) |
 | `README.md` | Execução e documentação de cada issue |
 
 ---
@@ -349,6 +349,85 @@ docker compose logs --no-log-prefix app | grep '"operation":"search_records"'
 ```
 
 Filtros inválidos geram `WARN` na camada `api` (nesse caso não há acesso ao banco). Tokens e senhas nunca são registrados.
+
+---
+
+## Issue #9: Listagem e Exclusão pela CLI
+
+Comandos `list` e `delete` na CLI (`cli.ts`). Como todos os comandos, eles só falam com a API, nos endpoints próprios `/api/cli/*`; a CLI **nunca** acessa o banco. O que a CLI lista ou exclui é o mesmo que a Web mostra.
+
+### Como usar
+
+Todos os comandos abaixo exigem o token da CLI, pela opção `--token` ou pela variável `TODO_TOKEN` (veja a seção da Issue #7).
+
+```bash
+# obtém o token e guarda em TODO_TOKEN (Linux / macOS / Git Bash; no PowerShell use $env:TODO_TOKEN = ...)
+export TODO_TOKEN=$(docker compose run --rm -T cli token)
+
+# lista a primeira página (5 tarefas, da mais recente para a mais antiga)
+docker compose run --rm cli list
+
+# segunda página, 10 por página, ordenada pelo título de A a Z
+docker compose run --rm cli list --page 2 --limit 10 --sort title --order asc
+
+# exclui a tarefa de ID 7
+docker compose run --rm cli delete --id 7
+```
+
+Exemplo de saída do `list`:
+
+```text
+ID  PRIORIDADE  CATEGORIA  PRAZO       TÍTULO
+12  alta        Estudo     2026-12-30  Preparar apresentação
+9   baixa       Pessoal    -           Comprar café
+Página 1 de 2 (total: 7)
+```
+
+Sem tarefas, a saída é `Nenhuma tarefa encontrada.` seguida do resumo. O `delete` imprime `Tarefa #7 excluída com sucesso.`.
+
+### Comandos e opções
+
+| Comando | Endpoint | O que faz |
+|---|---|---|
+| `list` | `GET /api/cli/records` | Lista as tarefas com paginação e ordenação |
+| `delete` | `DELETE /api/cli/records/{id}` | Exclui a tarefa do ID informado |
+
+| Opção | Vale para | Padrão | Descrição |
+|---|---|---|---|
+| `--page <n>` | `list` | `1` | Página (inteiro maior que zero). Se passar da última, a API devolve a última |
+| `--limit <n>` | `list` | `5` | Tarefas por página, de 1 a 100 |
+| `--sort <campo>` | `list` | `id` | `id`, `title`, `category`, `priority`, `due_date` ou `created_at` |
+| `--order <asc\|desc>` | `list` | `desc` | Direção da ordenação |
+| `-i, --id <id>` | `delete` | (obrigatória) | ID da tarefa (inteiro maior que zero) |
+| `--token <token>` | `list`, `delete` | `TODO_TOKEN` | Token Bearer da CLI |
+
+As opções também aceitam o formato `--opção=valor`. A ordenação por `priority` é alfabética (`alta`, `baixa`, `media`) e, em empate, vale o `id`. Com ordenação por `due_date` crescente, tarefas sem prazo vêm primeiro.
+
+Códigos de saída: `0` sucesso; `1` erro da API (401, 404, 400) ou de conexão; `2` uso incorreto (por exemplo, `delete` sem um `--id` válido). Nos erros 400 da listagem, a CLI mostra o motivo de cada parâmetro inválido.
+
+### Endpoints da Issue #9
+
+| Método | Rota | Autenticação | Resposta |
+|---|---|---|---|
+| GET | `/api/cli/records` | Bearer token da CLI | 200 `{ items, total, page, limit, totalPages }`; 400 com a lista `errors` se `page`, `limit`, `sort` ou `order` forem inválidos; 401 sem token válido |
+| DELETE | `/api/cli/records/{id}` | Bearer token da CLI | 200 `{ message, id }`; 400 se o ID não for inteiro positivo; 401 sem token válido; 404 se a tarefa não existir |
+
+Os endpoints e as consultas SQL da CLI (`Db.listCliRecords` e `Db.deleteCliRecord`) são próprios; o token da Web não vale nessas rotas. As alterações feitas pela CLI aparecem na Web e vice-versa, porque os dois usam a mesma tabela `records`.
+
+### Logs da Issue #9
+
+Cada comando gera uma linha na camada `api` e outra na camada `db`, com o **mesmo `request_id`** e `"client":"cli"`. Tokens nunca são registrados.
+
+```bash
+docker compose logs --no-log-prefix app | grep -E '"operation":"(list_records|list_cli_records|delete_record|delete_cli_record)"' | grep '"client":"cli"'
+```
+
+```json
+{"timestamp":"2026-11-16T03:00:00.000Z","level":"INFO","layer":"db","client":"cli","operation":"delete_cli_record","status":"success","request_id":"8a1e...","message":"Registro 7 excluído"}
+{"timestamp":"2026-11-16T03:00:00.001Z","level":"INFO","layer":"api","client":"cli","operation":"delete_record","status":"success","request_id":"8a1e...","message":"Registro 7 excluído com sucesso"}
+```
+
+Parâmetros ou ID inválidos geram `WARN` apenas na camada `api` (não há acesso ao banco); tarefa inexistente gera `WARN` nas duas camadas.
 
 ---
 
