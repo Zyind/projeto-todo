@@ -453,3 +453,121 @@ describe('bootstrap', () => {
     await server.close();
   });
 });
+
+describe('CLI (issue #7): GET /api/cli/health', () => {
+  it('responde 200 sem autenticação e registra o log com client cli', async () => {
+    const res = await request(app.getHttpServer()).get('/api/cli/health');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'ok' });
+    expect(logs()[0]).toMatchObject({
+      layer: 'api',
+      client: 'cli',
+      operation: 'health',
+      status: 'success',
+      request_id: res.headers['x-request-id'],
+    });
+  });
+});
+
+describe('CLI (issue #7): POST /api/cli/token', () => {
+  it('emite o token e correlaciona os logs da API e do banco com o mesmo request_id', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/cli/token')
+      .send({ username: 'admin', password: 'segredo123' });
+    expect(res.status).toBe(200);
+    expect(res.body.username).toBe('admin');
+    expect(typeof res.body.token).toBe('string');
+
+    const requestId = res.headers['x-request-id'];
+    const apiLog = logs().find((l) => l.layer === 'api' && l.operation === 'token');
+    const dbLog = logs().find((l) => l.layer === 'db' && l.operation === 'select_cli_user');
+    expect(apiLog).toMatchObject({ level: 'INFO', status: 'success', client: 'cli', request_id: requestId });
+    expect(dbLog).toMatchObject({ level: 'INFO', status: 'success', client: 'cli', request_id: requestId });
+  });
+
+  it('não expõe senha nem token nos logs', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/cli/token')
+      .send({ username: 'admin', password: 'segredo123' });
+    const everything = written.join('');
+    expect(everything).not.toContain('segredo123');
+    expect(everything).not.toContain(res.body.token);
+  });
+
+  it('responde 401 com senha errada e registra WARN sem expor a senha', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/cli/token')
+      .send({ username: 'admin', password: 'errada' });
+    expect(res.status).toBe(401);
+    expect(logs().find((l) => l.layer === 'api' && l.operation === 'token')).toMatchObject({
+      level: 'WARN',
+      status: 'error',
+      client: 'cli',
+    });
+    expect(written.join('')).not.toContain('errada');
+  });
+
+  it('responde 401 com usuário inexistente', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/cli/token')
+      .send({ username: 'ninguem', password: 'segredo123' });
+    expect(res.status).toBe(401);
+    expect(logs().find((l) => l.operation === 'select_cli_user')?.message).toContain('não encontrado');
+  });
+
+  it('responde 401 quando o corpo vem vazio', async () => {
+    const res = await request(app.getHttpServer()).post('/api/cli/token');
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('CLI (issue #7): GET /api/cli/me', () => {
+  it('aceita o token emitido para a CLI', async () => {
+    const issued = await request(app.getHttpServer())
+      .post('/api/cli/token')
+      .send({ username: 'admin', password: 'segredo123' });
+    written = [];
+    const res = await request(app.getHttpServer())
+      .get('/api/cli/me')
+      .set('Authorization', `Bearer ${issued.body.token}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ username: 'admin' });
+    expect(logs().find((l) => l.operation === 'me')).toMatchObject({ client: 'cli', status: 'success' });
+  });
+
+  it('responde 401 sem token e registra WARN', async () => {
+    const res = await request(app.getHttpServer()).get('/api/cli/me');
+    expect(res.status).toBe(401);
+    expect(logs().find((l) => l.operation === 'authenticate')).toMatchObject({
+      level: 'WARN',
+      status: 'error',
+      client: 'cli',
+    });
+  });
+
+  it('responde 401 com token inválido', async () => {
+    const res = await request(app.getHttpServer()).get('/api/cli/me').set('Authorization', 'Bearer abc.def');
+    expect(res.status).toBe(401);
+  });
+
+  it('responde 401 com token expirado', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/cli/me')
+      .set('Authorization', `Bearer ${auth.sign('admin', -10, 'cli')}`);
+    expect(res.status).toBe(401);
+  });
+
+  it('rejeita o token da Web (audiência diferente)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/cli/me')
+      .set('Authorization', `Bearer ${validToken}`);
+    expect(res.status).toBe(401);
+  });
+
+  it('o token da CLI não vale nos endpoints da Web', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/web/me')
+      .set('Authorization', `Bearer ${auth.sign('admin', 3600, 'cli')}`);
+    expect(res.status).toBe(401);
+  });
+});

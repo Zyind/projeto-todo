@@ -1,0 +1,189 @@
+import { FetchFn, parseArgs, run, USAGE } from '../cli';
+
+interface Captured {
+  out: string[];
+  err: string[];
+  io: { out(t: string): void; err(t: string): void };
+}
+
+function capture(): Captured {
+  const out: string[] = [];
+  const err: string[] = [];
+  return { out, err, io: { out: (t) => out.push(t), err: (t) => err.push(t) } };
+}
+
+/** Resposta falsa da API: só o que a CLI usa (`ok`, `status` e `json()`). */
+function reply(status: number, body: unknown): Response {
+  return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
+}
+
+describe('parseArgs', () => {
+  it('separa o comando das opções (--nome valor, --nome=valor e atalhos)', () => {
+    expect(parseArgs(['token', '--api-url', 'http://x', '-u', 'ana', '--password=s3', '-p', 'z'])).toEqual({
+      command: 'token',
+      flags: { 'api-url': 'http://x', username: 'ana', password: 'z' },
+      help: false,
+    });
+  });
+
+  it('reconhece -h e --help', () => {
+    expect(parseArgs(['-h']).help).toBe(true);
+    expect(parseArgs(['health', '--help']).help).toBe(true);
+  });
+
+  it('sem argumentos o comando é vazio', () => {
+    expect(parseArgs([]).command).toBe('');
+  });
+
+  it('acusa opção desconhecida', () => {
+    expect(parseArgs(['health', '--foo']).error).toBe('Opção desconhecida: --foo');
+  });
+
+  it('acusa opção sem valor', () => {
+    expect(parseArgs(['token', '--username']).error).toBe('A opção --username exige um valor');
+  });
+});
+
+describe('run: ajuda e uso incorreto', () => {
+  it.each([[[]], [['help']], [['health', '--help']], [['-h']]])('mostra a ajuda para %j', async (argv) => {
+    const c = capture();
+    const fetchFn = jest.fn();
+    expect(await run(argv, {}, c.io, fetchFn as unknown as FetchFn)).toBe(0);
+    expect(c.out).toEqual([USAGE]);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('lista os subcomandos na ajuda', () => {
+    for (const command of ['help', 'health', 'token', 'whoami']) expect(USAGE).toContain(command);
+  });
+
+  it('retorna 2 para comando desconhecido', async () => {
+    const c = capture();
+    expect(await run(['voar'], {}, c.io, jest.fn() as unknown as FetchFn)).toBe(2);
+    expect(c.err[0]).toBe('Comando desconhecido: voar');
+  });
+
+  it('retorna 2 para opção inválida', async () => {
+    const c = capture();
+    expect(await run(['health', '--x'], {}, c.io, jest.fn() as unknown as FetchFn)).toBe(2);
+    expect(c.err[0]).toBe('Opção desconhecida: --x');
+  });
+});
+
+describe('run: health', () => {
+  it('chama GET /api/cli/health sem token e imprime a resposta', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { status: 'ok' }));
+    const code = await run(['health'], { API_URL: 'http://api:3000/' }, c.io, fetchFn);
+    expect(code).toBe(0);
+    expect(c.out).toEqual(['{"status":"ok"}']);
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(url).toBe('http://api:3000/api/cli/health');
+    expect(init.method).toBe('GET');
+    expect(init.headers.Authorization).toBeUndefined();
+  });
+
+  it('a opção --api-url vence a variável API_URL e o padrão é localhost', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { status: 'ok' }));
+    await run(['health', '--api-url', 'http://outra:1'], { API_URL: 'http://api:3000' }, capture().io, fetchFn);
+    expect(fetchFn.mock.calls[0][0]).toBe('http://outra:1/api/cli/health');
+    await run(['health'], {}, capture().io, fetchFn);
+    expect(fetchFn.mock.calls[1][0]).toBe('http://localhost:3000/api/cli/health');
+  });
+
+  it('retorna 1 e escreve em stderr quando a API responde erro', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(503, { message: 'indisponível' }));
+    expect(await run(['health'], {}, c.io, fetchFn)).toBe(1);
+    expect(c.err).toEqual(['Erro HTTP 503 - indisponível']);
+  });
+
+  it('retorna 1 quando não consegue conectar à API', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockRejectedValue(new Error('fetch failed'));
+    expect(await run(['health'], { API_URL: 'http://api:3000' }, c.io, fetchFn)).toBe(1);
+    expect(c.err[0]).toBe('Não foi possível conectar à API em http://api:3000: fetch failed');
+  });
+});
+
+describe('run: token', () => {
+  it('envia usuário e senha a POST /api/cli/token e imprime só o token', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { token: 'abc.def', username: 'ana' }));
+    const code = await run(['token', '-u', 'ana', '-p', 'senha'], {}, c.io, fetchFn);
+    expect(code).toBe(0);
+    expect(c.out).toEqual(['abc.def']);
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(url).toBe('http://localhost:3000/api/cli/token');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ username: 'ana', password: 'senha' });
+  });
+
+  it('usa CLI_USER e CLI_PASSWORD quando as opções não são informadas', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { token: 't' }));
+    await run(['token'], { CLI_USER: 'env-user', CLI_PASSWORD: 'env-pass' }, capture().io, fetchFn);
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toEqual({ username: 'env-user', password: 'env-pass' });
+  });
+
+  it('retorna 2 sem chamar a API quando faltam credenciais', async () => {
+    const c = capture();
+    const fetchFn = jest.fn();
+    expect(await run(['token', '-u', 'ana'], {}, c.io, fetchFn as unknown as FetchFn)).toBe(2);
+    expect(c.err[0]).toContain('CLI_USER/CLI_PASSWORD');
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('retorna 1 com credenciais inválidas e não imprime a senha', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(401, { message: 'Usuário ou senha inválidos' }));
+    expect(await run(['token', '-u', 'ana', '-p', 'segredo-errado'], {}, c.io, fetchFn)).toBe(1);
+    expect(c.err).toEqual(['Erro HTTP 401 - Usuário ou senha inválidos']);
+    expect(c.out.join('') + c.err.join('')).not.toContain('segredo-errado');
+  });
+});
+
+describe('run: whoami (rota protegida)', () => {
+  it('envia o Bearer token da opção --token', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { username: 'ana' }));
+    expect(await run(['whoami', '--token', 'tok'], { TODO_TOKEN: 'outro' }, c.io, fetchFn)).toBe(0);
+    expect(c.out).toEqual(['{"username":"ana"}']);
+    expect(fetchFn.mock.calls[0][0]).toBe('http://localhost:3000/api/cli/me');
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBe('Bearer tok');
+  });
+
+  it('lê o token da variável TODO_TOKEN', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { username: 'ana' }));
+    await run(['whoami'], { TODO_TOKEN: 'do-ambiente' }, capture().io, fetchFn);
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBe('Bearer do-ambiente');
+  });
+
+  it('sem token ainda chama a API (que responde 401) e retorna 1', async () => {
+    const c = capture();
+    const fetchFn = jest.fn().mockResolvedValue(reply(401, { message: 'Unauthorized' }));
+    expect(await run(['whoami'], { TODO_TOKEN: '' }, c.io, fetchFn)).toBe(1);
+    expect(fetchFn.mock.calls[0][1].headers.Authorization).toBeUndefined();
+    expect(c.err).toEqual(['Erro HTTP 401 - Unauthorized']);
+  });
+
+  it('tolera resposta de erro sem JSON', async () => {
+    const c = capture();
+    const bad = { ok: false, status: 502, json: async () => Promise.reject(new Error('html')) } as unknown as Response;
+    expect(await run(['whoami'], {}, c.io, jest.fn().mockResolvedValue(bad))).toBe(1);
+    expect(c.err).toEqual(['Erro HTTP 502']);
+  });
+});
+
+describe('run: padrões', () => {
+  it('usa process.env, stdout/stderr e fetch globais quando nada é injetado', async () => {
+    const out = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const err = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(reply(200, { status: 'ok' }));
+    expect(await run(['health'])).toBe(0);
+    expect(await run(['voar'])).toBe(2);
+    expect(out).toHaveBeenCalledWith('{"status":"ok"}\n');
+    expect(err).toHaveBeenCalledWith('Comando desconhecido: voar\n');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    jest.restoreAllMocks();
+  });
+});

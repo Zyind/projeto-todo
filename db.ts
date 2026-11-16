@@ -118,6 +118,23 @@ export class Db {
     return row;
   }
 
+  /** Issue #7: busca o usuário na emissão do token da CLI (consulta e log próprios, client `cli`). */
+  findCliUser(username: string, requestId: string): UserRow | undefined {
+    const row = this.conn
+      .prepare('SELECT id, username, password_hash FROM users WHERE username = ? LIMIT 1')
+      .get(username) as UserRow | undefined;
+    logEvent({
+      level: 'INFO',
+      layer: 'db',
+      client: 'cli',
+      operation: 'select_cli_user',
+      status: 'success',
+      request_id: requestId,
+      message: row ? 'Usuário da CLI encontrado' : 'Usuário da CLI não encontrado',
+    });
+    return row;
+  }
+
   /** Insere um novo registro (tarefa) e registra o log na camada db. */
   createRecord(data: RecordInput, requestId: string, client: 'web' | 'cli'): RecordRow {
     const now = new Date().toISOString();
