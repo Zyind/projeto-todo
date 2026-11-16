@@ -250,3 +250,35 @@ describe('Db - Registros (Tarefas)', () => {
     db.close();
   });
 });
+
+describe('findCliUser (issue #7)', () => {
+  it('encontra o usuário e registra o log da camada db com client cli e o request_id recebido', () => {
+    const db = new Db(':memory:');
+    db.seedUser('admin', 'segredo123');
+    written = [];
+
+    const user = db.findCliUser('admin', 'req-cli-1');
+    expect(user?.username).toBe('admin');
+    expect(logs()[0]).toMatchObject({
+      level: 'INFO',
+      layer: 'db',
+      client: 'cli',
+      operation: 'select_cli_user',
+      status: 'success',
+      request_id: 'req-cli-1',
+      message: 'Usuário da CLI encontrado',
+    });
+    db.close();
+  });
+
+  it('retorna undefined e registra o log quando o usuário não existe', () => {
+    const db = new Db(':memory:');
+    expect(db.findCliUser('ninguem', 'req-cli-2')).toBeUndefined();
+    expect(logs()[0]).toMatchObject({
+      client: 'cli',
+      request_id: 'req-cli-2',
+      message: 'Usuário da CLI não encontrado',
+    });
+    db.close();
+  });
+});

@@ -11,7 +11,7 @@ Projeto da avaliação prática de Git e GitHub. Lista de tarefas com Web (React
 | `index.html` | Toda a Web (HTML, CSS e React via CDN embutidos) |
 | `api.ts` | API NestJS: endpoints, autenticação e logs da API |
 | `db.ts` | Acesso ao SQLite e logs da camada de banco |
-| `cli.ts` | CLI (chega na issue #7) |
+| `cli.ts` | CLI: fala só com a API (`/api/cli/*`), nunca com o banco (issue #7) |
 | `README.md` | Execução e documentação de cada issue |
 
 ---
@@ -155,6 +155,87 @@ curl -X POST http://localhost:3000/api/web/records \
 
 ---
 
+## Issue #7: Estrutura CLI (comandos, token Bearer e logs)
+
+A CLI (`cli.ts`) é um arquivo único que só conversa com a API por HTTP, nos endpoints próprios `/api/cli/*`. Ela **nunca** acessa o banco. Roda em contêiner, sem instalar nada no host.
+
+### Como usar a CLI
+
+```bash
+# ajuda e lista de subcomandos
+docker compose run --rm cli help
+
+# healthcheck (público); sobe a API automaticamente se ela ainda não estiver rodando
+docker compose run --rm cli health
+
+# obtém o token Bearer e imprime só o token
+docker compose run --rm cli token
+
+# comando protegido: informe o token pela opção --token ou pela variável TODO_TOKEN
+docker compose run --rm cli whoami --token SEU_TOKEN
+```
+
+Para guardar o token entre os comandos, use a variável de ambiente `TODO_TOKEN` (o Compose repassa ao contêiner da CLI). Na primeira vez rode `docker compose build` antes, para a saída do build não se misturar ao token:
+
+```bash
+# Linux / macOS / Git Bash
+export TODO_TOKEN=$(docker compose run --rm -T cli token)
+docker compose run --rm cli whoami
+
+# PowerShell
+$env:TODO_TOKEN = docker compose run --rm -T cli token
+docker compose run --rm cli whoami
+```
+
+Sem token, ou com token inválido, a API responde **HTTP 401** e a CLI imprime `Erro HTTP 401` em stderr e sai com código 1.
+
+### Subcomandos e opções
+
+| Subcomando | Endpoint | Autenticação | O que faz |
+|---|---|---|---|
+| `help` | (nenhum) | não | Mostra a ajuda (também `-h` / `--help`) |
+| `health` | `GET /api/cli/health` | pública | Imprime `{"status":"ok"}` |
+| `token` | `POST /api/cli/token` | credenciais no corpo | Imprime o token Bearer |
+| `whoami` | `GET /api/cli/me` | Bearer token | Imprime o usuário dono do token |
+
+| Opção | Variável de ambiente | Padrão |
+|---|---|---|
+| `--api-url <url>` | `API_URL` | `http://app:3000` no Compose (`http://localhost:3000` fora dele) |
+| `-u, --username <u>` | `CLI_USER` | `APP_USER` do Compose (`admin`) |
+| `-p, --password <p>` | `CLI_PASSWORD` | `APP_PASSWORD` do Compose |
+| `--token <token>` | `TODO_TOKEN` | vazio |
+
+Códigos de saída: `0` sucesso, `1` erro da API ou de conexão, `2` uso incorreto (comando ou opção desconhecidos, credenciais ausentes). Prefira as variáveis de ambiente a `--password`, que fica visível no histórico do shell.
+
+### Endpoints desta issue
+
+| Método | Rota | Autenticação | Resposta |
+|---|---|---|---|
+| GET | `/api/cli/health` | pública | 200 `{"status":"ok"}` |
+| POST | `/api/cli/token` | usuário e senha no corpo JSON | 200 `{"token":"...","username":"admin"}`; 401 se as credenciais forem inválidas |
+| GET | `/api/cli/me` | Bearer token da CLI | 200 `{"username":"admin"}`; 401 sem token válido |
+
+Esses endpoints são independentes dos `/api/web/*`: o token da CLI é emitido com audiência `cli` e **não vale** nos endpoints da Web (e o token da Web não vale nos da CLI). A consulta do usuário usa `Db.findCliUser`, própria da CLI.
+
+### Logs da CLI
+
+Cada chamada gera logs com `"client":"cli"`, na camada `api` e, quando acessa o banco (`token`), também na camada `db` com o **mesmo `request_id`**. Senhas e tokens nunca são registrados.
+
+```bash
+docker compose logs --no-log-prefix app | grep '"client":"cli"'
+```
+
+Exemplo do `token` (duas linhas, mesmo `request_id`):
+
+```json
+{"timestamp":"2026-11-15T23:58:28.855Z","level":"INFO","layer":"db","client":"cli","operation":"select_cli_user","status":"success","request_id":"7e0bb815-...","message":"Usuário da CLI encontrado"}
+{"timestamp":"2026-11-15T23:58:28.905Z","level":"INFO","layer":"api","client":"cli","operation":"token","status":"success","request_id":"7e0bb815-...","message":"Token da CLI emitido"}
+```
+
+Falhas de autenticação aparecem como `WARN` (`operation` `token` ou `authenticate`). `health` só gera log na camada `api`, pois não acessa o banco.
+
+---
+
 ## Logs e Correlação
 
 Cada operação gera **uma linha JSON por evento** no stdout, uma na camada `api` e outra na camada `db` (quando acessa o banco), com o **mesmo `request_id`**:
@@ -184,7 +265,7 @@ Execução integral via contêiner Docker:
 docker compose run --rm test
 ```
 
-Roda o Jest dentro do contêiner e afere a cobertura. A execução **exige 100% de cobertura de linhas** nos arquivos de produção existentes (`api.ts` e `db.ts`).
+Roda o Jest dentro do contêiner e afere a cobertura. A execução **exige 100% de cobertura de linhas** nos arquivos de produção existentes (`api.ts`, `db.ts` e `cli.ts`).
 
 ---
 

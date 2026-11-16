@@ -11,5 +11,5 @@
     "emitDecoratorMetadata": true,
     "types": ["node", "jest"]
   },
-  "include": ["api.ts", "db.ts"]
+  "include": ["api.ts", "db.ts", "cli.ts"]
 }

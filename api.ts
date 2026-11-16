@@ -32,6 +32,9 @@ import { join } from 'path';
 import { Db, LogEvent, logEvent, RecordInput, RecordRow, verifyPassword } from './db';
 
 const TOKEN_TTL_SECONDS = 3600;
+
+/** Quem pode usar o token: o login da Web ou o token da CLI. */
+export type TokenAudience = 'web' | 'cli';
 const VALID_PRIORITIES = ['baixa', 'media', 'alta'] as const;
 
 export interface AppConfig {
@@ -70,8 +73,9 @@ function apiLog(
   operation: string,
   status: LogEvent['status'],
   message: string,
+  client: LogEvent['client'] = 'web',
 ): void {
-  logEvent({ level, layer: 'api', client: 'web', operation, status, request_id: requestId, message });
+  logEvent({ level, layer: 'api', client, operation, status, request_id: requestId, message });
 }
 
 /** Valida os campos do formulário/corpo da requisição de cadastro e edição de registros. */
@@ -166,21 +170,25 @@ export class AuthService {
     @Inject('TOKEN_SECRET') private readonly secret: string,
   ) {}
 
-  /** Token assinado (HMAC-SHA256) no formato `payload.assinatura`, com expiração. */
-  sign(username: string, ttlSeconds = TOKEN_TTL_SECONDS): string {
+  /**
+   * Token assinado (HMAC-SHA256) no formato `payload.assinatura`, com expiração.
+   * O campo `aud` separa os tokens da Web e da CLI: um não vale no endpoint do outro.
+   */
+  sign(username: string, ttlSeconds = TOKEN_TTL_SECONDS, audience: TokenAudience = 'web'): string {
     const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
-    const payload = Buffer.from(JSON.stringify({ sub: username, exp })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ sub: username, exp, aud: audience })).toString('base64url');
     return `${payload}.${this.signature(payload)}`;
   }
 
-  /** Retorna o usuário dono do token, ou null se o token for inválido/expirado. */
-  verify(token: string): string | null {
+  /** Retorna o usuário dono do token, ou null se o token for inválido, expirado ou de outro cliente. */
+  verify(token: string, audience: TokenAudience = 'web'): string | null {
     const [payload, signature] = token.split('.');
     if (!payload || !signature) return null;
     const expected = Buffer.from(this.signature(payload));
     const received = Buffer.from(signature);
     if (expected.length !== received.length || !timingSafeEqual(expected, received)) return null;
-    const { sub, exp } = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    const { sub, exp, aud } = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    if ((aud ?? 'web') !== audience) return null;
     return exp > Math.floor(Date.now() / 1000) ? sub : null;
   }
 
@@ -192,6 +200,17 @@ export class AuthService {
     }
     apiLog(requestId, 'INFO', 'login', 'success', 'Login realizado com sucesso');
     return { token: this.sign(user.username), username: user.username };
+  }
+
+  /** Issue #7: emite o token Bearer da CLI (POST /api/cli/token), com consulta e logs próprios da CLI. */
+  issueCliToken(username: unknown, password: unknown, requestId: string): { token: string; username: string } {
+    const user = this.db.findCliUser(String(username), requestId);
+    if (!user || !verifyPassword(String(password), user.password_hash)) {
+      apiLog(requestId, 'WARN', 'token', 'error', 'Falha de autenticação: credenciais inválidas', 'cli');
+      throw new UnauthorizedException('Usuário ou senha inválidos');
+    }
+    apiLog(requestId, 'INFO', 'token', 'success', 'Token da CLI emitido', 'cli');
+    return { token: this.sign(user.username, TOKEN_TTL_SECONDS, 'cli'), username: user.username };
   }
 
   private signature(payload: string): string {
@@ -210,6 +229,31 @@ export class AuthGuard implements CanActivate {
     const user = this.auth.verify(header.startsWith('Bearer ') ? header.slice(7) : '');
     if (!user) {
       apiLog(req.requestId, 'WARN', 'authenticate', 'error', 'Falha de autenticação: token ausente ou inválido');
+      throw new UnauthorizedException();
+    }
+    req.user = user;
+    return true;
+  }
+}
+
+/** Protege as rotas da CLI: exige `Authorization: Bearer <token da CLI>`; caso contrário responde 401. */
+@Injectable()
+export class CliAuthGuard implements CanActivate {
+  constructor(private readonly auth: AuthService) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const req = context.switchToHttp().getRequest<WebRequest>();
+    const header = req.headers['authorization'] ?? '';
+    const user = this.auth.verify(header.startsWith('Bearer ') ? header.slice(7) : '', 'cli');
+    if (!user) {
+      apiLog(
+        req.requestId,
+        'WARN',
+        'authenticate',
+        'error',
+        'Falha de autenticação: token ausente ou inválido',
+        'cli',
+      );
       throw new UnauthorizedException();
     }
     req.user = user;
@@ -319,6 +363,31 @@ export class WebController {
   }
 }
 
+/** Issue #7: endpoints exclusivos da CLI (`/api/cli/*`), separados dos endpoints da Web. */
+@Controller('api/cli')
+export class CliController {
+  constructor(private readonly auth: AuthService) {}
+
+  @Get('health')
+  health(@Req() req: WebRequest): { status: string } {
+    apiLog(req.requestId, 'INFO', 'health', 'success', 'Healthcheck da CLI respondeu', 'cli');
+    return { status: 'ok' };
+  }
+
+  @Post('token')
+  @HttpCode(200)
+  token(@Body() body: LoginBody, @Req() req: WebRequest): { token: string; username: string } {
+    return this.auth.issueCliToken(body?.username, body?.password, req.requestId);
+  }
+
+  @Get('me')
+  @UseGuards(CliAuthGuard)
+  me(@Req() req: WebRequest): { username: string } {
+    apiLog(req.requestId, 'INFO', 'me', 'success', 'Sessão da CLI validada', 'cli');
+    return { username: req.user as string };
+  }
+}
+
 /** Entrega a página inicial (index.html). */
 @Controller()
 export class PageController {
@@ -334,12 +403,13 @@ export class AppModule implements NestModule {
   static register(db: Db, secret: string): DynamicModule {
     return {
       module: AppModule,
-      controllers: [WebController, PageController],
+      controllers: [WebController, CliController, PageController],
       providers: [
         { provide: 'DB', useValue: db },
         { provide: 'TOKEN_SECRET', useValue: secret },
         AuthService,
         AuthGuard,
+        CliAuthGuard,
       ],
     };
   }

@@ -17,6 +17,21 @@ services:
       timeout: 3s
       retries: 5
 
+  # CLI (issue #7): docker compose run --rm cli <comando>   (ex.: health, token, whoami, help)
+  # Sobe a API automaticamente. A CLI só fala com a API pela rede do Compose; não monta o volume do banco.
+  cli:
+    build: .
+    profiles: ["cli"]
+    depends_on:
+      app:
+        condition: service_healthy
+    entrypoint: ["node", "-e", "require('./dist/cli.js').run(process.argv.slice(1)).then((code) => process.exit(code))"]
+    environment:
+      API_URL: http://app:3000
+      CLI_USER: ${APP_USER:-admin}
+      CLI_PASSWORD: ${APP_PASSWORD:-admin123}
+      TODO_TOKEN: ${TODO_TOKEN:-}
+
   # Testes unitários + cobertura: docker compose run --rm test
   test:
     build: .
