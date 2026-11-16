@@ -38,6 +38,15 @@ export interface RecordInput {
   due_date?: string | null;
 }
 
+/** Filtros combináveis da busca avançada (issue #4). Filtro ausente significa "não filtrar". */
+export interface RecordFilters {
+  q?: string;
+  category?: string;
+  priority?: string;
+  due_from?: string;
+  due_to?: string;
+}
+
 export interface PaginatedRecords {
   items: RecordRow[];
   total: number;
@@ -321,6 +330,78 @@ export class Db {
       limit,
       totalPages,
     };
+  }
+
+  /**
+   * Issue #4: busca avançada com filtros combináveis (E lógico), paginação e ordenação.
+   * Consulta SQL própria da busca; os valores sempre vão por parâmetros (`?`).
+   * Registros sem prazo ficam de fora quando há filtro de prazo.
+   */
+  searchRecords(
+    filters: RecordFilters,
+    options: { page?: number; limit?: number; sort?: string; order?: string },
+    requestId: string,
+    client: 'web' | 'cli',
+  ): PaginatedRecords {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    const applied: string[] = [];
+
+    if (filters.q) {
+      const like = `%${filters.q.replace(/[\\%_]/g, '\\$&')}%`;
+      conditions.push("(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
+      params.push(like, like);
+      applied.push('q');
+    }
+    if (filters.category) {
+      conditions.push('category = ? COLLATE NOCASE');
+      params.push(filters.category);
+      applied.push('category');
+    }
+    if (filters.priority) {
+      conditions.push('priority = ?');
+      params.push(filters.priority);
+      applied.push('priority');
+    }
+    if (filters.due_from) {
+      conditions.push('due_date >= ?');
+      params.push(filters.due_from);
+      applied.push('due_from');
+    }
+    if (filters.due_to) {
+      conditions.push('due_date <= ?');
+      params.push(filters.due_to);
+      applied.push('due_to');
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const validSortFields = ['id', 'title', 'category', 'priority', 'due_date', 'created_at'];
+    const sort = options.sort && validSortFields.includes(options.sort) ? options.sort : 'id';
+    const order = options.order && options.order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit) || 5)));
+
+    const { count: total } = this.conn
+      .prepare(`SELECT COUNT(*) AS count FROM records ${where}`)
+      .get(...params) as { count: number };
+    const totalPages = Math.ceil(total / limit) || 1;
+    // Nunca devolve uma página além da última (ex.: depois de filtrar ou excluir).
+    const page = Math.min(totalPages, Math.max(1, Math.floor(Number(options.page) || 1)));
+
+    const items = this.conn
+      .prepare(`SELECT * FROM records ${where} ORDER BY ${sort} ${order} LIMIT ? OFFSET ?`)
+      .all(...params, limit, (page - 1) * limit) as RecordRow[];
+
+    logEvent({
+      level: 'INFO',
+      layer: 'db',
+      client,
+      operation: 'search_records',
+      status: 'success',
+      request_id: requestId,
+      message: `${total} registro(s) encontrado(s) (filtros: ${applied.join(', ') || 'nenhum'}; página ${page} de ${totalPages})`,
+    });
+
+    return { items, total, page, limit, totalPages };
   }
 
   close(): void {

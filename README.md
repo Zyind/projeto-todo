@@ -8,7 +8,7 @@ Projeto da avaliação prática de Git e GitHub. Lista de tarefas com Web (React
 
 | Arquivo | Responsabilidade |
 |---|---|
-| `index.html` | Toda a Web (HTML, CSS e React via CDN embutidos) |
+| `index.html` | Toda a Web (HTML, CSS e React via CDN embutidos): login, cadastro/edição, tabela e busca avançada |
 | `api.ts` | API NestJS: endpoints, autenticação e logs da API |
 | `db.ts` | Acesso ao SQLite e logs da camada de banco |
 | `cli.ts` | CLI: fala só com a API (`/api/cli/*`), nunca com o banco (issue #7) |
@@ -277,6 +277,78 @@ Exemplo do `token` (duas linhas, mesmo `request_id`):
 ```
 
 Falhas de autenticação aparecem como `WARN` (`operation` `token` ou `authenticate`). `health` só gera log na camada `api`, pois não acessa o banco.
+
+---
+
+## Issue #4: Busca Avançada (Web)
+
+Barra de filtros acima da tabela. Os filtros se **combinam** (E lógico), a consulta é **assíncrona** (a tabela se atualiza sem recarregar a página) e o botão **Limpar filtros** volta à listagem completa.
+
+### Como usar na tela
+
+1. Entre em http://localhost:3000 (`docker compose up --build`) e faça login.
+2. No cartão **Busca avançada**, preencha um ou mais filtros. A busca é enviada à API 300 ms depois da última alteração, volta para a página 1 e mantém paginação e ordenação.
+3. A tabela mostra "Resultados da busca (N)". Se nada corresponder, aparece uma mensagem pedindo para ajustar ou limpar os filtros.
+4. **Limpar filtros** zera todos os campos e recarrega a listagem completa.
+
+### Filtros
+
+| Filtro | Parâmetro | Como funciona |
+|---|---|---|
+| Texto | `q` | Procura no título **ou** na descrição, sem diferenciar maiúsculas; `%` e `_` valem como caracteres comuns. Até 100 caracteres |
+| Categoria | `category` | Igualdade exata, sem diferenciar maiúsculas. Até 50 caracteres |
+| Prioridade | `priority` | `baixa`, `media` ou `alta` |
+| Prazo de | `due_from` | Prazo maior ou igual à data (`AAAA-MM-DD`) |
+| Prazo até | `due_to` | Prazo menor ou igual à data (`AAAA-MM-DD`) |
+
+Filtro vazio equivale a filtro ausente. Com filtro de prazo, tarefas **sem prazo** não aparecem. Os parâmetros `page`, `limit`, `sort` e `order` funcionam como na listagem; a página pedida nunca passa da última.
+
+### Endpoint da Issue #4
+
+| Método | Rota | Autenticação | Descrição |
+|---|---|---|---|
+| GET | `/api/web/records/search` | Bearer token | Busca com filtros combináveis. Devolve `{ items, total, page, limit, totalPages }` (HTTP 200); HTTP 400 com a lista `errors` se algum filtro for inválido; HTTP 401 sem token válido |
+
+A rota `search` é declarada **antes** de `/api/web/records/{id}` para que o Nest não trate "search" como um identificador.
+
+### Exemplos via cURL
+
+```bash
+# Obter o token (veja a seção da Issue #2)
+TOKEN=$(curl -s -X POST http://localhost:3000/api/web/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | grep -o '"token":"[^"]*' | cut -d'"' -f4)
+
+# Texto + categoria + prioridade
+curl "http://localhost:3000/api/web/records/search?q=relat&category=Estudo&priority=alta" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Intervalo de prazo, ordenado pelo prazo
+curl "http://localhost:3000/api/web/records/search?due_from=2026-12-01&due_to=2026-12-31&sort=due_date&order=asc" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Filtro inválido: HTTP 400 {"message":"Filtros inválidos","errors":[...]}
+curl -i "http://localhost:3000/api/web/records/search?priority=urgente" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Sem token: HTTP 401
+curl -i "http://localhost:3000/api/web/records/search?q=teste"
+```
+
+### Logs da busca
+
+A busca gera uma linha na camada `api` e outra na camada `db`, com o **mesmo `request_id`**. O log do banco informa quais filtros foram usados (só os nomes, nunca os valores) e a página devolvida:
+
+```bash
+docker compose logs --no-log-prefix app | grep '"operation":"search_records"'
+```
+
+```json
+{"timestamp":"2026-11-16T01:00:00.000Z","level":"INFO","layer":"db","client":"web","operation":"search_records","status":"success","request_id":"3f5c...","message":"2 registro(s) encontrado(s) (filtros: q, priority; página 1 de 1)"}
+{"timestamp":"2026-11-16T01:00:00.001Z","level":"INFO","layer":"api","client":"web","operation":"search_records","status":"success","request_id":"3f5c...","message":"Busca retornou 2 registro(s) de 2"}
+```
+
+Filtros inválidos geram `WARN` na camada `api` (nesse caso não há acesso ao banco). Tokens e senhas nunca são registrados.
 
 ---
 

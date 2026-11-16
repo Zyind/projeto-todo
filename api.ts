@@ -31,7 +31,16 @@ import { NestFactory } from '@nestjs/core';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { Db, LogEvent, logEvent, PaginatedRecords, RecordInput, RecordRow, verifyPassword } from './db';
+import {
+  Db,
+  LogEvent,
+  logEvent,
+  PaginatedRecords,
+  RecordFilters,
+  RecordInput,
+  RecordRow,
+  verifyPassword,
+} from './db';
 
 const TOKEN_TTL_SECONDS = 3600;
 
@@ -153,6 +162,57 @@ export function validateRecordInput(body: unknown): {
       due_date: cleanDueDate,
     },
   };
+}
+
+/** Confere formato AAAA-MM-DD e se a data existe no calendário (rejeita, por exemplo, 2026-02-31). */
+function isRealDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+/** Issue #4: valida e normaliza os filtros da busca avançada (query string). Filtro vazio equivale a ausente. */
+export function validateSearchFilters(query: Record<string, unknown>): {
+  valid: boolean;
+  errors: string[];
+  filters: RecordFilters;
+} {
+  const errors: string[] = [];
+  const filters: RecordFilters = {};
+
+  const read = (name: string): string => {
+    const value = query[name];
+    if (value === undefined) return '';
+    if (typeof value !== 'string') {
+      errors.push(`Filtro ${name} deve ser informado uma única vez`);
+      return '';
+    }
+    return value.trim();
+  };
+
+  const q = read('q');
+  if (q.length > 100) errors.push('Texto da busca deve ter no máximo 100 caracteres');
+  else if (q) filters.q = q;
+
+  const category = read('category');
+  if (category.length > 50) errors.push('Categoria deve ter no máximo 50 caracteres');
+  else if (category) filters.category = category;
+
+  const priority = read('priority').toLowerCase();
+  if (priority && !VALID_PRIORITIES.includes(priority as (typeof VALID_PRIORITIES)[number])) {
+    errors.push('Prioridade deve ser baixa, media ou alta');
+  } else if (priority) filters.priority = priority;
+
+  for (const name of ['due_from', 'due_to'] as const) {
+    const date = read(name);
+    if (date && !isRealDate(date)) errors.push(`Filtro ${name} deve ser uma data válida no formato AAAA-MM-DD`);
+    else if (date) filters[name] = date;
+  }
+  if (filters.due_from && filters.due_to && filters.due_from > filters.due_to) {
+    errors.push('Prazo inicial não pode ser posterior ao prazo final');
+  }
+
+  return { valid: errors.length === 0, errors, filters };
 }
 
 /** Gera um request_id por requisição; o mesmo valor é repassado ao banco para correlacionar os logs. */
@@ -333,6 +393,40 @@ export class WebController {
 
     apiLog(req.requestId, 'INFO', 'update_record', 'success', `Registro ${id} atualizado com sucesso`);
     return updated;
+  }
+
+  /**
+   * Issue #4: busca avançada (GET /api/web/records/search). Declarada ANTES de `records/:id`,
+   * senão o Nest trataria "search" como um id.
+   */
+  @Get('records/search')
+  @UseGuards(AuthGuard)
+  searchRecords(@Query() query: Record<string, unknown>, @Req() req: WebRequest): PaginatedRecords {
+    const validation = validateSearchFilters(query);
+    if (!validation.valid) {
+      apiLog(req.requestId, 'WARN', 'search_records', 'error', 'Filtros de busca inválidos');
+      throw new BadRequestException({ message: 'Filtros inválidos', errors: validation.errors });
+    }
+
+    const result = this.db.searchRecords(
+      validation.filters,
+      {
+        page: Number(query.page),
+        limit: Number(query.limit),
+        sort: typeof query.sort === 'string' ? query.sort : undefined,
+        order: typeof query.order === 'string' ? query.order : undefined,
+      },
+      req.requestId,
+      'web',
+    );
+    apiLog(
+      req.requestId,
+      'INFO',
+      'search_records',
+      'success',
+      `Busca retornou ${result.items.length} registro(s) de ${result.total}`,
+    );
+    return result;
   }
 
   /** Consulta de registro específico por id (suporte ao formulário de edição). */

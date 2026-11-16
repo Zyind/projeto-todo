@@ -336,6 +336,98 @@ describe('Db - Registros (Tarefas)', () => {
   });
 });
 
+describe('Db - searchRecords (issue #4)', () => {
+  function seeded(): Db {
+    const db = new Db(':memory:');
+    const base = { description: 'Descrição' };
+    db.createRecord({ ...base, title: 'Relatório mensal', category: 'Trabalho', priority: 'alta', due_date: '2026-12-05' }, 's1', 'web');
+    db.createRecord({ ...base, title: 'Estudar Git', category: 'Estudo', priority: 'media', due_date: '2026-12-20' }, 's2', 'web');
+    db.createRecord({ ...base, title: 'Relatório anual', category: 'Estudo', priority: 'alta', due_date: null }, 's3', 'web');
+    db.createRecord({ ...base, title: '50% feito', description: 'ver item_1', category: 'Geral', priority: 'baixa' }, 's4', 'web');
+    written = [];
+    return db;
+  }
+  const titles = (r: { items: { title: string }[] }) => r.items.map((i) => i.title);
+  const page = { page: 1, limit: 5, sort: 'id', order: 'asc' };
+
+  it('sem filtros devolve tudo, paginado, e registra o log da camada db com o request_id', () => {
+    const db = seeded();
+    const result = db.searchRecords({}, { ...page, limit: 2 }, 'req-s1', 'web');
+    expect(result).toMatchObject({ total: 4, page: 1, limit: 2, totalPages: 2 });
+    expect(titles(result)).toEqual(['Relatório mensal', 'Estudar Git']);
+    expect(logs()[0]).toMatchObject({
+      level: 'INFO',
+      layer: 'db',
+      client: 'web',
+      operation: 'search_records',
+      status: 'success',
+      request_id: 'req-s1',
+    });
+    expect(logs()[0].message).toContain('filtros: nenhum');
+    db.close();
+  });
+
+  it('filtra por texto, categoria e prioridade, também combinados', () => {
+    const db = seeded();
+    expect(titles(db.searchRecords({ q: 'relatório' }, page, 'r', 'web'))).toEqual(['Relatório mensal', 'Relatório anual']);
+    expect(titles(db.searchRecords({ category: 'estudo' }, page, 'r', 'web'))).toEqual(['Estudar Git', 'Relatório anual']);
+    expect(titles(db.searchRecords({ priority: 'alta' }, page, 'r', 'web'))).toEqual(['Relatório mensal', 'Relatório anual']);
+    const combined = db.searchRecords({ q: 'relatório', category: 'Estudo', priority: 'alta' }, page, 'r', 'web');
+    expect(titles(combined)).toEqual(['Relatório anual']);
+    expect(logs().pop().message).toContain('filtros: q, category, priority');
+    db.close();
+  });
+
+  it('filtra por intervalo de prazo e exclui registros sem prazo', () => {
+    const db = seeded();
+    expect(titles(db.searchRecords({ due_from: '2026-12-10' }, page, 'r', 'web'))).toEqual(['Estudar Git']);
+    expect(titles(db.searchRecords({ due_to: '2026-12-10' }, page, 'r', 'web'))).toEqual(['Relatório mensal']);
+    const both = db.searchRecords({ due_from: '2026-12-01', due_to: '2026-12-31' }, page, 'r', 'web');
+    expect(titles(both)).toEqual(['Relatório mensal', 'Estudar Git']);
+    db.close();
+  });
+
+  it('trata %, _ e \\ como texto comum', () => {
+    const db = seeded();
+    expect(titles(db.searchRecords({ q: '50%' }, page, 'r', 'web'))).toEqual(['50% feito']);
+    expect(titles(db.searchRecords({ q: 'item_1' }, page, 'r', 'web'))).toEqual(['50% feito']);
+    expect(db.searchRecords({ q: 'item_2' }, page, 'r', 'web').total).toBe(0);
+    expect(db.searchRecords({ q: '%' }, page, 'r', 'web').total).toBe(1);
+    expect(db.searchRecords({ q: 'a\\b' }, page, 'r', 'web').total).toBe(0);
+    db.close();
+  });
+
+  it('não é vulnerável a injeção de SQL nos valores dos filtros', () => {
+    const db = seeded();
+    expect(db.searchRecords({ q: "' OR 1=1 --" }, page, 'r', 'web').total).toBe(0);
+    expect(db.searchRecords({ category: "x' OR '1'='1" }, page, 'r', 'web').total).toBe(0);
+    expect(db.searchRecords({}, page, 'r', 'web').total).toBe(4);
+    db.close();
+  });
+
+  it('ordena, usa o padrão para campo inválido e limita o tamanho da página', () => {
+    const db = seeded();
+    const desc = db.searchRecords({}, { page: 1, limit: 5, sort: 'title', order: 'desc' }, 'r', 'web');
+    expect(titles(desc)).toEqual(['Relatório mensal', 'Relatório anual', 'Estudar Git', '50% feito']);
+    const fallback = db.searchRecords({}, { page: 1, limit: 5, sort: 'drop table', order: 'qualquer' }, 'r', 'web');
+    expect(titles(fallback)[0]).toBe('50% feito');
+    expect(db.searchRecords({}, { limit: 1000 }, 'r', 'web').limit).toBe(100);
+    expect(db.searchRecords({}, {}, 'r', 'web')).toMatchObject({ page: 1, limit: 5 });
+    db.close();
+  });
+
+  it('nunca devolve página além da última nem abaixo da primeira', () => {
+    const db = seeded();
+    const beyond = db.searchRecords({}, { ...page, limit: 3, page: 99 }, 'r', 'web');
+    expect(beyond).toMatchObject({ page: 2, totalPages: 2 });
+    expect(beyond.items).toHaveLength(1);
+    expect(db.searchRecords({}, { ...page, page: -4 }, 'r', 'web').page).toBe(1);
+    const none = db.searchRecords({ q: 'inexistente' }, page, 'r', 'web');
+    expect(none).toMatchObject({ items: [], total: 0, page: 1, totalPages: 1 });
+    db.close();
+  });
+});
+
 describe('findCliUser (issue #7)', () => {
   it('encontra o usuário e registra o log da camada db com client cli e o request_id recebido', () => {
     const db = new Db(':memory:');
