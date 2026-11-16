@@ -128,6 +128,19 @@
       text-align: center; padding: 36px 20px; color: var(--muted);
       border: 1px dashed var(--border); border-radius: 12px;
     }
+    /* Estilos da Busca avançada da Issue #4 */
+    .filters-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: end;
+    }
+    .filters-grid .filter-wide { grid-column: span 4; }
+    @media (max-width: 640px) {
+      .filters-grid { grid-template-columns: 1fr 1fr; }
+      .filters-grid .filter-wide { grid-column: span 2; }
+    }
+    .filters-header {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+    }
+    .filters-header h2 { margin: 0; }
     .table-title { font-weight: 600; color: #0f172a; }
     .table-desc { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
   </style>
@@ -140,7 +153,14 @@
   <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
+
+    // Issue #4: filtros da busca avançada (valor vazio = filtro desligado)
+    const EMPTY_FILTERS = { q: '', category: '', priority: '', due_from: '', due_to: '' };
+    const SEARCH_DEBOUNCE_MS = 300;
+    function hasFilters(filters) {
+      return Object.values(filters).some((value) => value !== '');
+    }
 
     function readToken() {
       try { return sessionStorage.getItem('token'); } catch (e) { return null; }
@@ -415,7 +435,91 @@
     }
 
     /** Issue #3: Tabela de Tarefas com 4 campos visíveis, 5 itens por página, ordenação, seleção e exclusão */
+    function SearchFilters({ filters, active, error, onChange, onClear }) {
+      return (
+        <div className="card" id="search-section">
+          <div className="filters-header">
+            <h2>Busca avançada</h2>
+            <button
+              type="button"
+              className="secondary small"
+              disabled={!active}
+              onClick={onClear}
+            >
+              Limpar filtros
+            </button>
+          </div>
+
+          {error && <div className="alert alert-danger" role="alert">{error}</div>}
+
+          <div className="filters-grid">
+            <div className="filter-wide">
+              <label htmlFor="filter-q">Texto (título ou descrição)</label>
+              <input
+                id="filter-q"
+                type="search"
+                placeholder="Ex: relatório"
+                value={filters.q}
+                maxLength={100}
+                onChange={(e) => onChange('q', e.target.value)}
+              />
+            </div>
+            <div>
+              <label htmlFor="filter-category">Categoria</label>
+              <select
+                id="filter-category"
+                value={filters.category}
+                onChange={(e) => onChange('category', e.target.value)}
+              >
+                <option value="">Todas</option>
+                <option value="Trabalho">Trabalho</option>
+                <option value="Estudo">Estudo</option>
+                <option value="Pessoal">Pessoal</option>
+                <option value="Projetos">Projetos</option>
+                <option value="Geral">Geral</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="filter-priority">Prioridade</label>
+              <select
+                id="filter-priority"
+                value={filters.priority}
+                onChange={(e) => onChange('priority', e.target.value)}
+              >
+                <option value="">Todas</option>
+                <option value="baixa">Baixa</option>
+                <option value="media">Média</option>
+                <option value="alta">Alta</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="filter-due-from">Prazo de</label>
+              <input
+                id="filter-due-from"
+                type="date"
+                value={filters.due_from}
+                onChange={(e) => onChange('due_from', e.target.value)}
+              />
+            </div>
+            <div>
+              <label htmlFor="filter-due-to">Prazo até</label>
+              <input
+                id="filter-due-to"
+                type="date"
+                value={filters.due_to}
+                onChange={(e) => onChange('due_to', e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="field-hint">
+            Os filtros se combinam. Com filtro de prazo, tarefas sem prazo não aparecem.
+          </div>
+        </div>
+      );
+    }
+
     function RecordsTable({
+      filtersActive,
       records,
       total,
       page,
@@ -432,10 +536,11 @@
     }) {
       const [selectedIds, setSelectedIds] = useState([]);
 
-      // Limpa a seleção ao trocar de página
+      // Limpa a seleção quando a lista muda (outra página, ordenação ou filtros), para nunca
+      // excluir tarefas que já não estão visíveis.
       useEffect(() => {
         setSelectedIds([]);
-      }, [page]);
+      }, [records]);
 
       function toggleSelect(id) {
         setSelectedIds(prev =>
@@ -460,7 +565,7 @@
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div>
-              <h2>Tarefas Cadastradas ({total})</h2>
+              <h2>{filtersActive ? 'Resultados da busca' : 'Tarefas Cadastradas'} ({total})</h2>
               <div className="subtitle" style={{ margin: 0 }}>
                 Tabela paginada (5 itens/pág), ordenação por coluna e seleção múltipla.
               </div>
@@ -487,7 +592,9 @@
 
           {records.length === 0 ? (
             <div className="empty-state">
-              Nenhuma tarefa cadastrada no banco de dados. Utilize o formulário acima para adicionar!
+              {filtersActive
+                ? 'Nenhuma tarefa encontrada com os filtros aplicados. Ajuste ou limpe os filtros.'
+                : 'Nenhuma tarefa cadastrada no banco de dados. Utilize o formulário acima para adicionar!'}
             </div>
           ) : (
             <div className="table-container">
@@ -617,31 +724,74 @@
       const [loading, setLoading] = useState(false);
       const [editingRecord, setEditingRecord] = useState(null);
       const [feedback, setFeedback] = useState('');
+      // Issue #4: `draft` é o que está nos campos; `applied` é o que já foi enviado à API.
+      const [draft, setDraft] = useState(EMPTY_FILTERS);
+      const [applied, setApplied] = useState(EMPTY_FILTERS);
+      const [searchError, setSearchError] = useState('');
+      const latestRequest = useRef(0);
 
-      // Dados carregados do banco SQLite ao abrir a página
-      async function fetchRecords(p = page, s = sort, o = order) {
+      // Dados carregados do banco SQLite. Sem filtros usa a listagem; com filtros, a busca assíncrona.
+      async function fetchRecords(p = page, s = sort, o = order, f = applied) {
+        const requestNumber = ++latestRequest.current;
         setLoading(true);
         try {
-          const res = await fetch(`/api/web/records?page=${p}&limit=${limit}&sort=${s}&order=${o}`, {
+          const params = new URLSearchParams({ page: p, limit, sort: s, order: o });
+          const searching = hasFilters(f);
+          if (searching) {
+            Object.entries(f).forEach(([name, value]) => { if (value) params.set(name, value); });
+          }
+          const res = await fetch(`/api/web/records${searching ? '/search' : ''}?${params}`, {
             headers: { Authorization: `Bearer ${token}` }
           });
+          // Ignora respostas antigas quando o usuário já digitou outra coisa
+          if (requestNumber !== latestRequest.current) return;
           if (res.ok) {
             const data = await res.json();
             setRecords(data.items || []);
             setTotal(data.total || 0);
             setPage(data.page || 1);
             setTotalPages(data.totalPages || 1);
+            setSearchError('');
+          } else if (res.status === 400) {
+            // Filtro inválido: mostra o erro e esvazia a tabela para não exibir resultado de outra busca
+            const data = await res.json();
+            setSearchError((data.errors || [data.message]).join(' '));
+            setRecords([]);
+            setTotal(0);
+            setTotalPages(1);
           }
         } catch (e) {
           console.error('Falha ao carregar registros do banco', e);
         } finally {
-          setLoading(false);
+          if (requestNumber === latestRequest.current) setLoading(false);
         }
       }
 
       useEffect(() => {
-        fetchRecords(page, sort, order);
-      }, [page, sort, order]);
+        fetchRecords(page, sort, order, applied);
+      }, [page, sort, order, applied]);
+
+      // Envia os filtros à API 300 ms depois da última alteração e volta para a página 1
+      useEffect(() => {
+        const timer = setTimeout(() => {
+          if (JSON.stringify(applied) !== JSON.stringify(draft)) {
+            setApplied(draft);
+            setPage(1);
+          }
+        }, SEARCH_DEBOUNCE_MS);
+        return () => clearTimeout(timer);
+      }, [draft, applied]);
+
+      function handleFilterChange(field, value) {
+        setDraft((current) => ({ ...current, [field]: value }));
+      }
+
+      function handleClearFilters() {
+        setDraft(EMPTY_FILTERS);
+        setApplied(EMPTY_FILTERS);
+        setSearchError('');
+        setPage(1);
+      }
 
       function handleSortChange(field) {
         if (sort === field) {
@@ -713,7 +863,16 @@
             token={token}
           />
 
+          <SearchFilters
+            filters={draft}
+            active={hasFilters(draft) || hasFilters(applied)}
+            error={searchError}
+            onChange={handleFilterChange}
+            onClear={handleClearFilters}
+          />
+
           <RecordsTable
+            filtersActive={hasFilters(applied)}
             records={records}
             total={total}
             page={page}

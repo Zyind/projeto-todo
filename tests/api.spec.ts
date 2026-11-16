@@ -1,7 +1,14 @@
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
-import { AppModule, AuthService, bootstrap, loadConfig, validateRecordInput } from '../api';
+import {
+  AppModule,
+  AuthService,
+  bootstrap,
+  loadConfig,
+  validateRecordInput,
+  validateSearchFilters,
+} from '../api';
 import { Db } from '../db';
 
 let written: string[];
@@ -487,6 +494,198 @@ describe('DELETE /api/web/records/:id (Exclusão - issue #3)', () => {
       .get(`/api/web/records/${createdId}`)
       .set('Authorization', `Bearer ${validToken}`);
     expect(check.status).toBe(404);
+  });
+});
+
+describe('validateSearchFilters (issue #4)', () => {
+  it('aceita consulta sem filtros', () => {
+    expect(validateSearchFilters({})).toEqual({ valid: true, errors: [], filters: {} });
+  });
+
+  it('normaliza os valores (trim, prioridade em minúsculas) e ignora filtros vazios', () => {
+    const result = validateSearchFilters({
+      q: '  relatório ',
+      category: ' Estudo ',
+      priority: 'ALTA',
+      due_from: '2026-12-01',
+      due_to: '',
+    });
+    expect(result).toEqual({
+      valid: true,
+      errors: [],
+      filters: { q: 'relatório', category: 'Estudo', priority: 'alta', due_from: '2026-12-01' },
+    });
+  });
+
+  it('rejeita prioridade fora de baixa, media e alta', () => {
+    const result = validateSearchFilters({ priority: 'urgente' });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(['Prioridade deve ser baixa, media ou alta']);
+  });
+
+  it.each(['01/12/2026', '2026-13-01', '2026-02-31', 'abc'])('rejeita data inválida %s', (value) => {
+    const result = validateSearchFilters({ due_from: value, due_to: value });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toHaveLength(2);
+    expect(result.errors[0]).toContain('due_from');
+    expect(result.errors[1]).toContain('due_to');
+  });
+
+  it('rejeita prazo inicial posterior ao final', () => {
+    const result = validateSearchFilters({ due_from: '2026-12-31', due_to: '2026-12-01' });
+    expect(result.errors).toEqual(['Prazo inicial não pode ser posterior ao prazo final']);
+  });
+
+  it('rejeita texto com mais de 100 caracteres e categoria com mais de 50', () => {
+    const result = validateSearchFilters({ q: 'a'.repeat(101), category: 'b'.repeat(51) });
+    expect(result.errors).toEqual([
+      'Texto da busca deve ter no máximo 100 caracteres',
+      'Categoria deve ter no máximo 50 caracteres',
+    ]);
+  });
+
+  it('rejeita filtro repetido (valor que não é texto)', () => {
+    const result = validateSearchFilters({ q: ['a', 'b'] });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(['Filtro q deve ser informado uma única vez']);
+  });
+});
+
+describe('GET /api/web/records/search (busca avançada - issue #4)', () => {
+  const search = (query: string) =>
+    request(app.getHttpServer()).get(`/api/web/records/search${query}`).set('Authorization', `Bearer ${validToken}`);
+
+  const create = async (data: Record<string, unknown>) => {
+    const res = await request(app.getHttpServer())
+      .post('/api/web/records')
+      .set('Authorization', `Bearer ${validToken}`)
+      .send({ description: 'Descrição padrão', ...data });
+    expect(res.status).toBe(201);
+    return res.body;
+  };
+
+  beforeAll(async () => {
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await create({ title: 'LupaAlfa um', category: 'Estudo', priority: 'alta', due_date: '2026-12-01' });
+    await create({ title: 'LupaAlfa dois', category: 'Trabalho', priority: 'baixa', due_date: '2026-12-15' });
+    await create({ title: 'LupaBeta', category: 'Estudo', priority: 'alta', due_date: '2027-01-10' });
+    await create({ title: 'LupaGama', category: 'Estudo', priority: 'alta' });
+    await create({ title: 'Cem por cento', description: 'Meta de 100% concluída_ok', category: 'Geral', priority: 'media' });
+    jest.restoreAllMocks();
+  });
+
+  const titles = (res: { body: { items: { title: string }[] } }) => res.body.items.map((i) => i.title).sort();
+
+  it('responde 401 sem token e registra WARN', async () => {
+    const res = await request(app.getHttpServer()).get('/api/web/records/search?q=Lupa');
+    expect(res.status).toBe(401);
+    expect(logs().find((l) => l.operation === 'authenticate')).toMatchObject({ level: 'WARN', status: 'error' });
+  });
+
+  it('responde 401 com token inválido', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/web/records/search')
+      .set('Authorization', 'Bearer abc.def');
+    expect(res.status).toBe(401);
+  });
+
+  it('não confunde "search" com um id (a rota é anterior a records/:id)', async () => {
+    const res = await search('');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({ page: 1, limit: 5 }));
+    expect(Array.isArray(res.body.items)).toBe(true);
+  });
+
+  it('sem filtros devolve todos os registros paginados', async () => {
+    const res = await search('?limit=100');
+    expect(res.body.total).toBeGreaterThanOrEqual(5);
+    expect(res.body.items.length).toBe(res.body.total);
+  });
+
+  it('filtra por texto no título ou na descrição, sem diferenciar maiúsculas', async () => {
+    const byTitle = await search('?q=Lupaalfa');
+    expect(titles(byTitle)).toEqual(['LupaAlfa dois', 'LupaAlfa um']);
+    const byDescription = await search(`?q=${encodeURIComponent('Meta de')}`);
+    expect(titles(byDescription)).toEqual(['Cem por cento']);
+  });
+
+  it('trata % e _ do texto como caracteres comuns, não como curingas', async () => {
+    expect(titles(await search('?q=100%25'))).toEqual(['Cem por cento']);
+    expect(titles(await search(`?q=${encodeURIComponent('ída_ok')}`))).toEqual(['Cem por cento']);
+    expect((await search('?q=%25')).body.total).toBe(1);
+    expect((await search('?q=_')).body.total).toBe(1);
+  });
+
+  it('filtra por categoria (sem diferenciar maiúsculas) e por prioridade', async () => {
+    expect(titles(await search('?q=Lupa&category=estudo'))).toEqual(['LupaAlfa um', 'LupaBeta', 'LupaGama']);
+    expect(titles(await search('?q=Lupa&priority=baixa'))).toEqual(['LupaAlfa dois']);
+  });
+
+  it('combina texto, categoria e prioridade (E lógico)', async () => {
+    const res = await search('?q=LupaAlfa&category=Estudo&priority=alta');
+    expect(titles(res)).toEqual(['LupaAlfa um']);
+    expect(res.body.total).toBe(1);
+    expect((await search('?q=LupaAlfa&category=Trabalho&priority=alta')).body.total).toBe(0);
+  });
+
+  it('filtra por intervalo de prazo, deixando de fora registros sem prazo', async () => {
+    const range = await search('?q=Lupa&due_from=2026-12-01&due_to=2026-12-31');
+    expect(titles(range)).toEqual(['LupaAlfa dois', 'LupaAlfa um']);
+    expect(titles(await search('?q=Lupa&due_to=2026-12-10'))).toEqual(['LupaAlfa um']);
+    expect(titles(await search('?q=Lupa&due_from=2027-01-01'))).toEqual(['LupaBeta']);
+  });
+
+  it('combina os cinco filtros', async () => {
+    const res = await search('?q=Alfa&category=Estudo&priority=alta&due_from=2026-12-01&due_to=2026-12-01');
+    expect(titles(res)).toEqual(['LupaAlfa um']);
+  });
+
+  it('pagina e ordena o resultado filtrado', async () => {
+    const first = await search('?q=Lupa&limit=2&page=1&sort=title&order=asc');
+    expect(first.body).toMatchObject({ total: 4, page: 1, limit: 2, totalPages: 2 });
+    expect(first.body.items.map((i: { title: string }) => i.title)).toEqual(['LupaAlfa dois', 'LupaAlfa um']);
+    const second = await search('?q=Lupa&limit=2&page=2&sort=title&order=asc');
+    expect(second.body.items.map((i: { title: string }) => i.title)).toEqual(['LupaBeta', 'LupaGama']);
+  });
+
+  it('nunca devolve página além da última', async () => {
+    const res = await search('?q=Lupa&limit=2&page=99');
+    expect(res.body.page).toBe(2);
+    expect(res.body.items).toHaveLength(2);
+  });
+
+  it('devolve lista vazia, mas com 200, quando nada corresponde', async () => {
+    const res = await search('?q=nao-existe-xyz');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ items: [], total: 0, page: 1, totalPages: 1 });
+  });
+
+  it('responde 400 com a lista de erros quando os filtros são inválidos', async () => {
+    const res = await search('?priority=urgente&due_from=2026-02-31&due_to=abc');
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Filtros inválidos');
+    expect(res.body.errors).toHaveLength(3);
+    expect(logs().find((l) => l.operation === 'search_records')).toMatchObject({
+      layer: 'api',
+      level: 'WARN',
+      status: 'error',
+    });
+  });
+
+  it('responde 400 com filtro repetido e com intervalo invertido', async () => {
+    expect((await search('?q=a&q=b')).status).toBe(400);
+    expect((await search('?due_from=2026-12-31&due_to=2026-12-01')).status).toBe(400);
+  });
+
+  it('correlaciona os logs da API e do banco com o mesmo request_id e não expõe o token', async () => {
+    const res = await search('?q=LupaAlfa&priority=alta');
+    const requestId = res.headers['x-request-id'];
+    const apiLog = logs().find((l) => l.layer === 'api' && l.operation === 'search_records');
+    const dbLog = logs().find((l) => l.layer === 'db' && l.operation === 'search_records');
+    expect(apiLog).toMatchObject({ level: 'INFO', status: 'success', client: 'web', request_id: requestId });
+    expect(dbLog).toMatchObject({ level: 'INFO', status: 'success', client: 'web', request_id: requestId });
+    expect(dbLog.message).toContain('filtros: q, priority');
+    expect(written.join('')).not.toContain(validToken);
   });
 });
 
