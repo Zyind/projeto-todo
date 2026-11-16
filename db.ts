@@ -47,6 +47,9 @@ export interface RecordFilters {
   due_to?: string;
 }
 
+/** Colunas permitidas na ordenação da listagem da CLI (issue #9). */
+export const RECORD_SORT_FIELDS = ['id', 'title', 'category', 'priority', 'due_date', 'created_at'] as const;
+
 export interface PaginatedRecords {
   items: RecordRow[];
   total: number;
@@ -402,6 +405,63 @@ export class Db {
     });
 
     return { items, total, page, limit, totalPages };
+  }
+
+  /**
+   * Issue #9: listagem paginada e ordenada exclusiva da CLI. Consulta própria; a coluna de ordenação
+   * só entra no SQL se estiver na lista permitida e a página devolvida nunca passa da última.
+   */
+  listCliRecords(
+    options: { page: number; limit: number; sort: string; order: string },
+    requestId: string,
+  ): PaginatedRecords {
+    const sort = (RECORD_SORT_FIELDS as readonly string[]).includes(options.sort) ? options.sort : 'id';
+    const order = options.order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
+
+    const { count: total } = this.conn.prepare('SELECT COUNT(*) AS count FROM records').get() as {
+      count: number;
+    };
+    const totalPages = Math.ceil(total / limit) || 1;
+    const page = Math.min(totalPages, Math.max(1, Math.floor(options.page)));
+
+    // O desempate por id mantém a ordem estável entre as páginas.
+    const items = this.conn
+      .prepare(
+        `SELECT id, title, description, category, priority, due_date, created_at, updated_at
+         FROM records ORDER BY ${sort} ${order}, id ${order} LIMIT ? OFFSET ?`,
+      )
+      .all(limit, (page - 1) * limit) as RecordRow[];
+
+    logEvent({
+      level: 'INFO',
+      layer: 'db',
+      client: 'cli',
+      operation: 'list_cli_records',
+      status: 'success',
+      request_id: requestId,
+      message: `${items.length} registro(s) listado(s) (página ${page} de ${totalPages}; total ${total})`,
+    });
+
+    return { items, total, page, limit, totalPages };
+  }
+
+  /** Issue #9: exclusão por identificador exclusiva da CLI. Retorna false se o registro não existir. */
+  deleteCliRecord(id: number, requestId: string): boolean {
+    const { changes } = this.conn.prepare('DELETE FROM records WHERE id = ?').run(id);
+    const deleted = changes > 0;
+
+    logEvent({
+      level: deleted ? 'INFO' : 'WARN',
+      layer: 'db',
+      client: 'cli',
+      operation: 'delete_cli_record',
+      status: deleted ? 'success' : 'error',
+      request_id: requestId,
+      message: deleted ? `Registro ${id} excluído` : `Registro ${id} não encontrado para exclusão`,
+    });
+
+    return deleted;
   }
 
   close(): void {

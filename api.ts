@@ -36,6 +36,7 @@ import {
   LogEvent,
   logEvent,
   PaginatedRecords,
+  RECORD_SORT_FIELDS,
   RecordFilters,
   RecordInput,
   RecordRow,
@@ -213,6 +214,62 @@ export function validateSearchFilters(query: Record<string, unknown>): {
   }
 
   return { valid: errors.length === 0, errors, filters };
+}
+
+/**
+ * Issue #9: valida e normaliza os parâmetros da listagem da CLI (page, limit, sort, order).
+ * Parâmetro ausente ou vazio usa o padrão; valor inválido gera erro (a CLI mostra o motivo).
+ */
+export function parseCliListOptions(query: Record<string, unknown>): {
+  valid: boolean;
+  errors: string[];
+  options: { page: number; limit: number; sort: string; order: string };
+} {
+  const errors: string[] = [];
+
+  const read = (name: string): string | undefined => {
+    const value = query[name];
+    if (value === undefined || value === '') return undefined;
+    if (typeof value !== 'string') {
+      errors.push(`Parâmetro ${name} deve ser informado uma única vez`);
+      return undefined;
+    }
+    return value.trim();
+  };
+
+  const toInteger = (name: string, label: string, fallback: number, max?: number): number => {
+    const raw = read(name);
+    if (raw === undefined) return fallback;
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw) || value < 1 || (max !== undefined && value > max)) {
+      errors.push(
+        max === undefined
+          ? `${label} deve ser um número inteiro maior que zero`
+          : `${label} deve ser um número inteiro de 1 a ${max}`,
+      );
+      return fallback;
+    }
+    return value;
+  };
+
+  const page = toInteger('page', 'Página', 1);
+  const limit = toInteger('limit', 'Limite', 5, 100);
+
+  let sort = 'id';
+  const rawSort = read('sort');
+  if (rawSort !== undefined) {
+    if ((RECORD_SORT_FIELDS as readonly string[]).includes(rawSort)) sort = rawSort;
+    else errors.push(`Ordenação deve ser um destes campos: ${RECORD_SORT_FIELDS.join(', ')}`);
+  }
+
+  let order = 'desc';
+  const rawOrder = read('order')?.toLowerCase();
+  if (rawOrder !== undefined) {
+    if (rawOrder === 'asc' || rawOrder === 'desc') order = rawOrder;
+    else errors.push('Direção da ordenação deve ser asc ou desc');
+  }
+
+  return { valid: errors.length === 0, errors, options: { page, limit, sort, order } };
 }
 
 /** Gera um request_id por requisição; o mesmo valor é repassado ao banco para correlacionar os logs. */
@@ -573,6 +630,53 @@ export class CliController {
     apiLog(req.requestId, 'INFO', 'update_record', 'success', `Registro ${id} atualizado com sucesso`, 'cli');
 
     return updated;
+  }
+
+  /** Issue #9: listagem paginada e ordenada via CLI (GET /api/cli/records), com consulta própria da CLI. */
+  @Get('records')
+  @UseGuards(CliAuthGuard)
+  listRecords(@Query() query: Record<string, unknown>, @Req() req: WebRequest): PaginatedRecords {
+    const parsed = parseCliListOptions(query);
+
+    if (!parsed.valid) {
+      apiLog(req.requestId, 'WARN', 'list_records', 'error', 'Parâmetros de listagem inválidos', 'cli');
+      throw new BadRequestException({ message: 'Parâmetros inválidos', errors: parsed.errors });
+    }
+
+    const result = this.db.listCliRecords(parsed.options, req.requestId);
+
+    apiLog(
+      req.requestId,
+      'INFO',
+      'list_records',
+      'success',
+      `Listagem retornou ${result.items.length} registro(s) de ${result.total}`,
+      'cli',
+    );
+
+    return result;
+  }
+
+  /** Issue #9: exclusão por identificador via CLI (DELETE /api/cli/records/{id}). */
+  @Delete('records/:id')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(CliAuthGuard)
+  deleteRecord(@Param('id') idParam: string, @Req() req: WebRequest): { message: string; id: number } {
+    const id = Number(idParam);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      apiLog(req.requestId, 'WARN', 'delete_record', 'error', 'ID de registro inválido', 'cli');
+      throw new BadRequestException('ID de registro deve ser um número inteiro positivo');
+    }
+
+    if (!this.db.deleteCliRecord(id, req.requestId)) {
+      apiLog(req.requestId, 'WARN', 'delete_record', 'error', `Registro ${id} não encontrado`, 'cli');
+      throw new NotFoundException(`Registro ${id} não encontrado`);
+    }
+
+    apiLog(req.requestId, 'INFO', 'delete_record', 'success', `Registro ${id} excluído com sucesso`, 'cli');
+
+    return { message: 'Registro excluído com sucesso', id };
   }
 }
 

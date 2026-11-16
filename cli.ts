@@ -38,6 +38,10 @@ const VALUE_FLAGS = new Set([
   'category',
   'priority',
   'due-date',
+  'page',
+  'limit',
+  'sort',
+  'order',
 ]);
 
 const FLAG_ALIASES: Record<string, string> = {
@@ -57,18 +61,24 @@ Comandos:
   whoami     Mostra o usuário do token (GET /api/cli/me, exige token)
   create     Cadastra uma tarefa (POST /api/cli/records, exige token)
   update     Edita uma tarefa (PUT /api/cli/records/:id, exige token)
+  list       Lista as tarefas com paginação e ordenação (GET /api/cli/records, exige token)
+  delete     Exclui uma tarefa pelo ID (DELETE /api/cli/records/:id, exige token)
 
 Opções:
   --api-url <url>          Endereço da API (env API_URL, padrão ${DEFAULT_API_URL})
   -u, --username <u>       Usuário do comando token (env CLI_USER)
   -p, --password <p>       Senha do comando token (env CLI_PASSWORD)
   --token <token>          Token dos comandos protegidos (env TODO_TOKEN)
-  -i, --id <id>            ID da tarefa para edição
+  -i, --id <id>            ID da tarefa (update e delete)
   --title <texto>          Título da tarefa
   --description <texto>    Descrição da tarefa
   --category <categoria>   Categoria da tarefa
   --priority <prioridade>  Prioridade: baixa, media ou alta
   --due-date <data>        Data de vencimento (YYYY-MM-DD)
+  --page <n>               Página da listagem (padrão 1)
+  --limit <n>              Tarefas por página, de 1 a 100 (padrão 5)
+  --sort <campo>           Ordenação: id, title, category, priority, due_date ou created_at (padrão id)
+  --order <asc|desc>       Direção da ordenação (padrão desc)
   -h, --help               Mostra esta ajuda
 
 Códigos de saída: 0 sucesso, 1 erro na API ou na conexão, 2 uso incorreto.`;
@@ -132,11 +142,35 @@ async function callApi(
   return { ok: res.ok, status: res.status, data };
 }
 
-/** Mostra o erro devolvido pela API em stderr e retorna código 1. */
+/** Mostra o erro devolvido pela API em stderr (com a lista `errors`, se houver) e retorna código 1. */
 function reportHttpError(io: CliIo, result: ApiResult): number {
   const detail = result.data.message ? ` - ${String(result.data.message)}` : '';
-  io.err(`Erro HTTP ${result.status}${detail}`);
+  const reasons = Array.isArray(result.data.errors) ? `: ${result.data.errors.join('; ')}` : '';
+  io.err(`Erro HTTP ${result.status}${detail}${reasons}`);
   return 1;
+}
+
+interface ListedRecord {
+  id: number;
+  title: string;
+  category: string;
+  priority: string;
+  due_date: string | null;
+}
+
+/** Monta a tabela em texto da listagem e o resumo da página. */
+function formatRecordList(data: Record<string, unknown>): string {
+  const items = (data.items ?? []) as ListedRecord[];
+  const summary = `Página ${data.page} de ${data.totalPages} (total: ${data.total})`;
+  if (items.length === 0) return `Nenhuma tarefa encontrada.\n${summary}`;
+
+  const header = ['ID', 'PRIORIDADE', 'CATEGORIA', 'PRAZO', 'TÍTULO'];
+  const rows = items.map((r) => [String(r.id), r.priority, r.category, r.due_date ?? '-', r.title]);
+  const widths = header.map((h, col) => Math.max(h.length, ...rows.map((row) => row[col].length)));
+  const line = (cells: string[]) =>
+    cells.map((cell, col) => (col === cells.length - 1 ? cell : cell.padEnd(widths[col]))).join('  ');
+
+  return [line(header), ...rows.map(line), summary].join('\n');
 }
 
 /** Executa a CLI. Retorna o código de saída sem chamar process.exit. */
@@ -259,6 +293,44 @@ export async function run(
         if (!result.ok) return reportHttpError(io, result);
 
         io.out(JSON.stringify(result.data));
+        return 0;
+      }
+
+      case 'list': {
+        const token = args.flags.token ?? env.TODO_TOKEN;
+        const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+
+        const query = new URLSearchParams();
+        for (const name of ['page', 'limit', 'sort', 'order']) {
+          if (args.flags[name] !== undefined) query.set(name, args.flags[name]);
+        }
+        const queryString = query.toString();
+        const suffix = queryString ? `?${queryString}` : '';
+
+        const result = await callApi(fetchFn, 'GET', `${baseUrl}/api/cli/records${suffix}`, headers);
+
+        if (!result.ok) return reportHttpError(io, result);
+
+        io.out(formatRecordList(result.data));
+        return 0;
+      }
+
+      case 'delete': {
+        const id = Number(args.flags.id);
+
+        if (!args.flags.id || !Number.isInteger(id) || id <= 0) {
+          io.err('Informe o ID da tarefa a excluir usando --id.');
+          return 2;
+        }
+
+        const token = args.flags.token ?? env.TODO_TOKEN;
+        const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+
+        const result = await callApi(fetchFn, 'DELETE', `${baseUrl}/api/cli/records/${id}`, headers);
+
+        if (!result.ok) return reportHttpError(io, result);
+
+        io.out(`Tarefa #${id} excluída com sucesso.`);
         return 0;
       }
 

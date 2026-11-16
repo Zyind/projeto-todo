@@ -6,6 +6,7 @@ import {
   AuthService,
   bootstrap,
   loadConfig,
+  parseCliListOptions,
   validateRecordInput,
   validateSearchFilters,
 } from '../api';
@@ -973,4 +974,243 @@ describe('CLI (issue #8): PUT /api/cli/records/:id (Edição)', () => {
   });
 });
 
+});
+
+describe('parseCliListOptions (issue #9)', () => {
+  it('usa os padrões quando os parâmetros faltam ou vêm vazios', () => {
+    const defaults = { page: 1, limit: 5, sort: 'id', order: 'desc' };
+    expect(parseCliListOptions({})).toEqual({ valid: true, errors: [], options: defaults });
+    expect(parseCliListOptions({ page: '', limit: '', sort: '', order: '' }).options).toEqual(defaults);
+  });
+
+  it('aceita e normaliza valores válidos', () => {
+    const result = parseCliListOptions({ page: '2', limit: ' 10 ', sort: 'title', order: 'ASC' });
+    expect(result).toEqual({
+      valid: true,
+      errors: [],
+      options: { page: 2, limit: 10, sort: 'title', order: 'asc' },
+    });
+  });
+
+  it.each([
+    [{ page: '0' }, 'Página deve ser um número inteiro maior que zero'],
+    [{ page: '-1' }, 'Página deve ser um número inteiro maior que zero'],
+    [{ page: '1.5' }, 'Página deve ser um número inteiro maior que zero'],
+    [{ page: 'abc' }, 'Página deve ser um número inteiro maior que zero'],
+    [{ limit: '0' }, 'Limite deve ser um número inteiro de 1 a 100'],
+    [{ limit: '101' }, 'Limite deve ser um número inteiro de 1 a 100'],
+    [{ sort: 'drop' }, 'Ordenação deve ser um destes campos: id, title, category, priority, due_date, created_at'],
+    [{ order: 'up' }, 'Direção da ordenação deve ser asc ou desc'],
+    [{ page: ['1', '2'] }, 'Parâmetro page deve ser informado uma única vez'],
+  ])('rejeita %j', (query, message) => {
+    const result = parseCliListOptions(query as Record<string, unknown>);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual([message]);
+  });
+
+  it('acumula todos os erros e mantém os padrões nos campos inválidos', () => {
+    const result = parseCliListOptions({ page: '0', limit: '500', sort: 'x', order: 'y' });
+    expect(result.errors).toHaveLength(4);
+    expect(result.options).toEqual({ page: 1, limit: 5, sort: 'id', order: 'desc' });
+  });
+});
+
+describe('CLI (issue #9): GET /api/cli/records (Listagem)', () => {
+  // Banco e aplicação próprios, para o conteúdo ser conhecido e os resultados exatos.
+  let listApp: INestApplication;
+  let listDb: Db;
+  let cliToken: string;
+  let webToken: string;
+
+  const get = (query = '') =>
+    request(listApp.getHttpServer()).get(`/api/cli/records${query}`).set('Authorization', `Bearer ${cliToken}`);
+  const ids = (res: { body: { items: { id: number }[] } }) => res.body.items.map((i) => i.id);
+  const titles = (res: { body: { items: { title: string }[] } }) => res.body.items.map((i) => i.title);
+
+  beforeAll(async () => {
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    listDb = new Db(':memory:');
+    listDb.seedUser('admin', 'segredo123');
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule.register(listDb, 'chave-da-listagem')],
+    }).compile();
+    listApp = moduleRef.createNestApplication();
+    await listApp.init();
+    const listAuth = moduleRef.get(AuthService);
+    cliToken = listAuth.sign('admin', 3600, 'cli');
+    webToken = listAuth.sign('admin');
+    const seed: [string, string, string, string | null][] = [
+      ['Delta', 'Trabalho', 'alta', '2026-12-10'],
+      ['Alfa', 'Estudo', 'baixa', null],
+      ['Charlie', 'Estudo', 'media', '2026-12-01'],
+      ['Bravo', 'Geral', 'alta', '2026-12-20'],
+      ['Echo', 'Pessoal', 'baixa', '2026-12-05'],
+      ['Foxtrot', 'Projetos', 'media', '2026-12-15'],
+      ['Golf', 'Trabalho', 'alta', null],
+    ];
+    for (const [title, category, priority, due_date] of seed) {
+      listDb.createRecord({ title, description: 'Descrição', category, priority, due_date }, 'seed', 'cli');
+    }
+    jest.restoreAllMocks();
+  });
+
+  afterAll(async () => {
+    await listApp.close();
+    listDb.close();
+  });
+
+  it('responde 401 sem token, com token inválido e com o token da Web', async () => {
+    const server = listApp.getHttpServer();
+    expect((await request(server).get('/api/cli/records')).status).toBe(401);
+    expect((await request(server).get('/api/cli/records').set('Authorization', 'Bearer abc.def')).status).toBe(401);
+    expect((await request(server).get('/api/cli/records').set('Authorization', `Bearer ${webToken}`)).status).toBe(401);
+    expect(logs().find((l) => l.operation === 'authenticate')).toMatchObject({ client: 'cli', level: 'WARN' });
+  });
+
+  it('lista 5 por página, do mais recente para o mais antigo, com os totais', async () => {
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ total: 7, page: 1, limit: 5, totalPages: 2 });
+    expect(ids(res)).toEqual([7, 6, 5, 4, 3]);
+    expect((await get('?page=2')).body.items.map((i: { id: number }) => i.id)).toEqual([2, 1]);
+  });
+
+  it('ordena por título, categoria, prioridade, prazo e data de criação nas duas direções', async () => {
+    expect(titles(await get('?sort=title&order=asc&limit=3'))).toEqual(['Alfa', 'Bravo', 'Charlie']);
+    expect(titles(await get('?sort=title&order=desc&limit=2'))).toEqual(['Golf', 'Foxtrot']);
+    expect(titles(await get('?sort=category&order=asc&limit=2'))).toEqual(['Alfa', 'Charlie']);
+    expect(titles(await get('?sort=priority&order=asc&limit=3'))).toEqual(['Delta', 'Bravo', 'Golf']);
+    expect(titles(await get('?sort=due_date&order=asc&limit=3'))).toEqual(['Alfa', 'Golf', 'Charlie']);
+    expect(ids(await get('?sort=created_at&order=asc&limit=3'))).toEqual([1, 2, 3]);
+  });
+
+  it('aceita limit até 100 e nunca devolve página além da última', async () => {
+    const all = await get('?limit=100');
+    expect(all.body).toMatchObject({ total: 7, limit: 100, totalPages: 1 });
+    expect(all.body.items).toHaveLength(7);
+    const beyond = await get('?page=99');
+    expect(beyond.body.page).toBe(2);
+    expect(ids(beyond)).toEqual([2, 1]);
+  });
+
+  it('trata parâmetros vazios como ausentes', async () => {
+    const res = await get('?page=&limit=&sort=&order=');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ page: 1, limit: 5 });
+  });
+
+  it('responde 400 com a lista de erros quando os parâmetros são inválidos', async () => {
+    const res = await get('?page=0&limit=101&sort=drop&order=up');
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Parâmetros inválidos');
+    expect(res.body.errors).toHaveLength(4);
+    expect(logs().find((l) => l.layer === 'api' && l.operation === 'list_records')).toMatchObject({
+      level: 'WARN',
+      status: 'error',
+      client: 'cli',
+    });
+    expect((await get('?page=1&page=2')).status).toBe(400);
+  });
+
+  it('devolve o mesmo que a Web para os mesmos parâmetros', async () => {
+    const web = await request(listApp.getHttpServer())
+      .get('/api/web/records?page=1&limit=5&sort=title&order=asc')
+      .set('Authorization', `Bearer ${webToken}`);
+    const cli = await get('?page=1&limit=5&sort=title&order=asc');
+    expect(ids(cli)).toEqual(ids(web));
+    expect(cli.body.total).toBe(web.body.total);
+  });
+
+  it('correlaciona os logs da API e do banco e não expõe o token', async () => {
+    const res = await get('?page=2&limit=3');
+    const requestId = res.headers['x-request-id'];
+    const apiLog = logs().find((l) => l.layer === 'api' && l.operation === 'list_records');
+    const dbLog = logs().find((l) => l.layer === 'db' && l.operation === 'list_cli_records');
+    expect(apiLog).toMatchObject({ level: 'INFO', status: 'success', client: 'cli', request_id: requestId });
+    expect(dbLog).toMatchObject({ level: 'INFO', status: 'success', client: 'cli', request_id: requestId });
+    expect(dbLog.message).toContain('página 2 de 3');
+    expect(written.join('')).not.toContain(cliToken);
+  });
+});
+
+describe('CLI (issue #9): DELETE /api/cli/records/:id (Exclusão)', () => {
+  const cliToken = () => auth.sign('admin', 3600, 'cli');
+  const create = async (title: string): Promise<number> => {
+    const res = await request(app.getHttpServer())
+      .post('/api/cli/records')
+      .set('Authorization', `Bearer ${cliToken()}`)
+      .send({ title, description: 'Descrição', category: 'Geral', priority: 'baixa' });
+    expect(res.status).toBe(201);
+    return res.body.id;
+  };
+  const remove = (id: number | string, token: string | null = cliToken()) => {
+    const req = request(app.getHttpServer()).delete(`/api/cli/records/${id}`);
+    return token ? req.set('Authorization', `Bearer ${token}`) : req;
+  };
+
+  it('responde 401 sem token e com o token da Web, sem excluir nada', async () => {
+    const id = await create('Não pode ser excluída');
+    expect((await remove(id, null)).status).toBe(401);
+    expect((await remove(id, validToken)).status).toBe(401);
+    const still = await request(app.getHttpServer())
+      .get(`/api/web/records/${id}`)
+      .set('Authorization', `Bearer ${validToken}`);
+    expect(still.status).toBe(200);
+  });
+
+  it.each(['abc', '0', '-3', '1.5'])('responde 400 para o id inválido %s', async (badId) => {
+    const res = await remove(badId);
+    expect(res.status).toBe(400);
+    expect(logs().find((l) => l.layer === 'api' && l.operation === 'delete_record')).toMatchObject({
+      level: 'WARN',
+      status: 'error',
+      client: 'cli',
+    });
+  });
+
+  it('responde 404 para id inexistente e correlaciona os logs de erro', async () => {
+    const res = await remove(999999);
+    expect(res.status).toBe(404);
+    const requestId = res.headers['x-request-id'];
+    expect(logs().find((l) => l.layer === 'api' && l.operation === 'delete_record')).toMatchObject({
+      level: 'WARN',
+      status: 'error',
+      request_id: requestId,
+    });
+    expect(logs().find((l) => l.layer === 'db' && l.operation === 'delete_cli_record')).toMatchObject({
+      level: 'WARN',
+      status: 'error',
+      client: 'cli',
+      request_id: requestId,
+    });
+  });
+
+  it('exclui a tarefa, correlaciona os logs e ela some da Web', async () => {
+    const id = await create('Tarefa a excluir pela CLI');
+    written = [];
+    const res = await remove(id);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ message: 'Registro excluído com sucesso', id });
+
+    const requestId = res.headers['x-request-id'];
+    expect(logs().find((l) => l.layer === 'api' && l.operation === 'delete_record')).toMatchObject({
+      level: 'INFO',
+      status: 'success',
+      client: 'cli',
+      request_id: requestId,
+    });
+    expect(logs().find((l) => l.layer === 'db' && l.operation === 'delete_cli_record')).toMatchObject({
+      level: 'INFO',
+      status: 'success',
+      client: 'cli',
+      request_id: requestId,
+    });
+    expect(written.join('')).not.toContain(cliToken());
+
+    const onWeb = await request(app.getHttpServer())
+      .get(`/api/web/records/${id}`)
+      .set('Authorization', `Bearer ${validToken}`);
+    expect(onWeb.status).toBe(404);
+    expect((await remove(id)).status).toBe(404);
+  });
 });

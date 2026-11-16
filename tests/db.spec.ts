@@ -428,6 +428,113 @@ describe('Db - searchRecords (issue #4)', () => {
   });
 });
 
+describe('Db - listCliRecords e deleteCliRecord (issue #9)', () => {
+  function seeded(): Db {
+    const db = new Db(':memory:');
+    const base = { description: 'Descrição', category: 'Geral' };
+    db.createRecord({ ...base, title: 'Charlie', priority: 'media', due_date: '2026-12-01' }, 'c1', 'cli');
+    db.createRecord({ ...base, title: 'Alfa', priority: 'alta', due_date: null }, 'c2', 'cli');
+    db.createRecord({ ...base, title: 'Bravo', priority: 'alta', due_date: '2026-12-09' }, 'c3', 'cli');
+    db.createRecord({ ...base, title: 'Delta', priority: 'baixa' }, 'c4', 'cli');
+    written = [];
+    return db;
+  }
+  const titles = (r: { items: { title: string }[] }) => r.items.map((i) => i.title);
+  const opts = { page: 1, limit: 5, sort: 'id', order: 'desc' };
+
+  it('lista paginado, devolve os totais e registra o log da camada db com client cli', () => {
+    const db = seeded();
+    const result = db.listCliRecords({ ...opts, limit: 3 }, 'req-l1');
+    expect(result).toMatchObject({ total: 4, page: 1, limit: 3, totalPages: 2 });
+    expect(titles(result)).toEqual(['Delta', 'Bravo', 'Alfa']);
+    expect(logs()[0]).toMatchObject({
+      level: 'INFO',
+      layer: 'db',
+      client: 'cli',
+      operation: 'list_cli_records',
+      status: 'success',
+      request_id: 'req-l1',
+    });
+    expect(logs()[0].message).toContain('página 1 de 2; total 4');
+    expect(titles(db.listCliRecords({ ...opts, limit: 3, page: 2 }, 'req-l2'))).toEqual(['Charlie']);
+    db.close();
+  });
+
+  it('ordena nas duas direções e desempata pelo id', () => {
+    const db = seeded();
+    expect(titles(db.listCliRecords({ ...opts, sort: 'title', order: 'asc' }, 'r'))).toEqual([
+      'Alfa',
+      'Bravo',
+      'Charlie',
+      'Delta',
+    ]);
+    expect(titles(db.listCliRecords({ ...opts, sort: 'title', order: 'DESC' }, 'r'))).toEqual([
+      'Delta',
+      'Charlie',
+      'Bravo',
+      'Alfa',
+    ]);
+    expect(titles(db.listCliRecords({ ...opts, sort: 'priority', order: 'asc' }, 'r'))).toEqual([
+      'Alfa',
+      'Bravo',
+      'Delta',
+      'Charlie',
+    ]);
+    db.close();
+  });
+
+  it('usa id quando a coluna de ordenação não é permitida e limita o tamanho da página', () => {
+    const db = seeded();
+    const fallback = db.listCliRecords({ ...opts, sort: 'x; DROP TABLE records' }, 'r');
+    expect(titles(fallback)).toEqual(['Delta', 'Bravo', 'Alfa', 'Charlie']);
+    expect(db.listCliRecords({ ...opts, limit: 5000 }, 'r').limit).toBe(100);
+    expect(db.listCliRecords({ ...opts, limit: 0 }, 'r').limit).toBe(1);
+    expect(db.listCliRecords(opts, 'r').total).toBe(4);
+    db.close();
+  });
+
+  it('nunca devolve página fora do intervalo e lista vazia tem página 1 de 1', () => {
+    const db = seeded();
+    expect(db.listCliRecords({ ...opts, page: 99, limit: 3 }, 'r')).toMatchObject({ page: 2, totalPages: 2 });
+    expect(db.listCliRecords({ ...opts, page: -5 }, 'r').page).toBe(1);
+    const empty = new Db(':memory:');
+    expect(empty.listCliRecords(opts, 'r')).toMatchObject({ items: [], total: 0, page: 1, totalPages: 1 });
+    empty.close();
+    db.close();
+  });
+
+  it('exclui por id, registra o log de sucesso e o registro some da listagem da Web', () => {
+    const db = seeded();
+    expect(db.deleteCliRecord(2, 'req-d1')).toBe(true);
+    expect(logs()[0]).toMatchObject({
+      level: 'INFO',
+      layer: 'db',
+      client: 'cli',
+      operation: 'delete_cli_record',
+      status: 'success',
+      request_id: 'req-d1',
+      message: 'Registro 2 excluído',
+    });
+    expect(db.findRecordById(2, 'r', 'web')).toBeUndefined();
+    expect(db.listRecordsPaginated({ page: 1, limit: 5 }, 'r', 'web').total).toBe(3);
+    db.close();
+  });
+
+  it('retorna false e registra WARN quando o registro não existe', () => {
+    const db = seeded();
+    expect(db.deleteCliRecord(999, 'req-d2')).toBe(false);
+    expect(logs()[0]).toMatchObject({
+      level: 'WARN',
+      status: 'error',
+      client: 'cli',
+      request_id: 'req-d2',
+      message: 'Registro 999 não encontrado para exclusão',
+    });
+    expect(db.listCliRecords(opts, 'r').total).toBe(4);
+    db.close();
+  });
+});
+
 describe('findCliUser (issue #7)', () => {
   it('encontra o usuário e registra o log da camada db com client cli e o request_id recebido', () => {
     const db = new Db(':memory:');
